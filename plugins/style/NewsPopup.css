@@ -1,6 +1,6 @@
 div.newspopup-dialog-container {
     z-index: 202;
-    position: fixed;
+    position: absolute;
     left: 0;
     right: 0;
     top: 0;
@@ -47,6 +47,7 @@ div.newspopup-dialog-popup-body {
     flex: 1 1 auto;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 div.newspopup-dialog-popup-body > iframe {
@@ -55,6 +56,12 @@ div.newspopup-dialog-popup-body > iframe {
     background-color: transparent;
     flex: 1 1 auto;
     height: 0;
+}
+
+div.newspopup-dialog-popup-body > div.newspopup-dialog-popup-content {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: 0.5em;
 }
 
 div.newspopup-dialog-popup-body > div.newspopup-dialog-popup-buttonbar {
@@ -70,4 +77,18 @@ div.newspopup-dialog-popup-body > div.newspopup-dialog-popup-buttonbar button {
     color: white;
     font-weight: bold;
     border: 1px solid var(--border-color);
+}
+
+#NewsPopup {
+    height: 480px;
+}
+
+#NewsPopup div.newspopup-dialog-popup-body {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+#NewsPopup div.newspopup-dialog-popup-body > iframe {
+    flex: 1 1 auto;
 }

@@ -1,22 +1,22 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
+import deepmerge from 'deepmerge';
 import isEmpty from 'lodash.isempty';
-import {UrlParams} from '../utils/PermaLinkUtils';
-import LayerUtils from '../utils/LayerUtils';
-import VectorLayerUtils from '../utils/VectorLayerUtils';
 import {v4 as uuidv4} from 'uuid';
+
 import {
     LayerRole,
     SET_LAYER_LOADING,
     ADD_LAYER,
     ADD_LAYER_SEPARATOR,
+    SET_LAYER_METADATA,
     REMOVE_LAYER,
     REORDER_LAYER,
     CHANGE_LAYER_PROPERTY,
@@ -29,31 +29,23 @@ import {
     REMOVE_ALL_LAYERS,
     REPLACE_PLACEHOLDER_LAYER,
     SET_SWIPE,
-    SET_LAYERS,
-    SET_FILTER
+    SET_FILTER,
+    SET_THEME_LAYERS_VISIBILITY_PRESET
 } from '../actions/layers';
-
-
-function propagateLayerProperty(newlayer, property, value, path = null) {
-    Object.assign(newlayer, {[property]: value});
-    // Don't propagate visibility for mutually exclusive groups
-    if (newlayer.sublayers && !(property === "visibility" && newlayer.mutuallyExclusive)) {
-        newlayer.sublayers = newlayer.sublayers.map((sublayer, idx) => {
-            if (path === null || (!isEmpty(path) && path[0] === idx)) {
-                const newsublayer = {...sublayer};
-                propagateLayerProperty(newsublayer, property, value, path ? path.slice(1) : null);
-                return newsublayer;
-            } else {
-                return sublayer;
-            }
-        });
-    }
-}
+import LayerUtils from '../utils/LayerUtils';
+import {UrlParams} from '../utils/PermaLinkUtils';
+import VectorLayerUtils from '../utils/VectorLayerUtils';
 
 const defaultState = {
     flat: [],
     loading: [],
-    swipe: null
+    swipe: null,
+    filter: {
+        filterParams: null,
+        filterGeom: null,
+        timeRange: null
+    },
+    editConfigs: {}
 };
 
 export default function layers(state = defaultState, action) {
@@ -68,7 +60,7 @@ export default function layers(state = defaultState, action) {
         };
     }
     case CHANGE_LAYER_PROPERTY: {
-        const targetLayer = state.flat.find((layer) => {return layer.uuid === action.layerUuid; });
+        const targetLayer = state.flat.find((layer) => {return layer.id === action.layerId; });
         if (!targetLayer) {
             return state;
         }
@@ -84,7 +76,7 @@ export default function layers(state = defaultState, action) {
         }
 
         const newLayers = (state.flat || []).map((layer) => {
-            if (layer.uuid === action.layerUuid) {
+            if (layer.id === action.layerId) {
 
                 const {newlayer, newsublayer} = LayerUtils.cloneLayer(layer, action.sublayerpath || []);
                 newsublayer[action.property] = action.newvalue;
@@ -99,14 +91,14 @@ export default function layers(state = defaultState, action) {
                 }
 
                 if (["children", "both"].includes(recurseDirection)) { // recurse to children (except visibility to children in mutex case)
-                    propagateLayerProperty(newsublayer, action.property, action.newvalue);
+                    LayerUtils.propagateLayerProperty(newsublayer, action.property, action.newvalue);
                 }
                 if (["parents", "both"].includes(recurseDirection)) { // recurse to parents
-                    propagateLayerProperty(newlayer, action.property, action.newvalue, action.sublayerpath);
+                    LayerUtils.propagateLayerProperty(newlayer, action.property, action.newvalue, action.sublayerpath);
                 }
 
                 if (newlayer.type === "wms") {
-                    Object.assign(newlayer, LayerUtils.buildWMSLayerParams(newlayer));
+                    Object.assign(newlayer, LayerUtils.buildWMSLayerParams(newlayer, state.filter));
                 }
                 if (newlayer.role === LayerRole.BACKGROUND) {
                     UrlParams.updateParams({bl: newlayer.visibility ? newlayer.name : ''});
@@ -121,10 +113,15 @@ export default function layers(state = defaultState, action) {
         return {...state, flat: newLayers};
     }
     case SET_LAYER_DIMENSIONS: {
+        // Set dimensions for all layers with the same URL (i.e. if a WMS is split)
+        const layerUrl = state.flat.find(layer => layer.id === action.layerId)?.url;
+        if (!layerUrl) {
+            return "";
+        }
         const newLayers = (state.flat || []).map((layer) => {
-            if (layer.id === action.layerId) {
+            if (layer.url === layerUrl) {
                 const newLayer = {...layer, dimensionValues: action.dimensions};
-                Object.assign(newLayer, LayerUtils.buildWMSLayerParams(newLayer));
+                Object.assign(newLayer, LayerUtils.buildWMSLayerParams(newLayer, state.filter));
                 return newLayer;
             }
             return layer;
@@ -137,19 +134,20 @@ export default function layers(state = defaultState, action) {
         const newLayer = {
             ...action.layer,
             id: layerId,
+            srcid: action.layer.srcid ?? uuidv4(),
             name: action.layer.name || layerId,
             role: action.layer.role || LayerRole.USERLAYER,
             queryable: action.layer.queryable || false,
-            visibility: action.layer.visibility !== undefined ? action.layer.visibility : true,
-            opacity: action.layer.opacity || 255,
-            layertreehidden: action.layer.layertreehidden || action.layer.role > LayerRole.USERLAYER
+            visibility: action.layer.visibility ?? true,
+            opacity: action.layer.opacity ?? 255,
+            layertreehidden: action.options?.layertreehidden ?? action.layer.layertreehidden ?? action.layer.role > LayerRole.USERLAYER
         };
-        LayerUtils.addUUIDs(newLayer);
-        if (newLayer.type === "wms") {
-            Object.assign(newLayer, LayerUtils.buildWMSLayerParams(newLayer));
-        }
-        if (action.beforename) {
-            newLayers = LayerUtils.insertLayer(newLayers, newLayer, "name", action.beforename);
+        if (action.options?.beforeLayerName || action.options?.afterLayerName) {
+            newLayers = LayerUtils.insertLayer(
+                newLayers, newLayer, "name",
+                action.options.beforeLayerName || action.options.afterLayerName,
+                action.options.afterLayerName ? true : false
+            );
         } else {
             let inspos = 0;
             if (action.pos === null) {
@@ -161,14 +159,60 @@ export default function layers(state = defaultState, action) {
             // Compress layers if possible
             newLayers = LayerUtils.implodeLayers(LayerUtils.explodeLayers(newLayers));
         }
+        newLayers = newLayers.map(layer => {
+            if (layer.type === "wms") {
+                return {...layer, ...LayerUtils.buildWMSLayerParams(layer, state.filter)};
+            }
+            return layer;
+        });
         UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
         if (newLayer.role === LayerRole.BACKGROUND && newLayer.visibility) {
             UrlParams.updateParams({bl: newLayer.name});
         }
-        return {...state, flat: newLayers};
+        let newEditConfigs = state.editConfigs;
+        if (newLayer.editConfig && newLayer.wms_name) {
+            newEditConfigs = {
+                ...newEditConfigs,
+                [newLayer.wms_name]: {
+                    ...newEditConfigs[newLayer.wms_name],
+                    ...newLayer.editConfig
+                }
+            };
+        }
+        return {...state, flat: newLayers, editConfigs: newEditConfigs};
+    }
+    case SET_LAYER_METADATA: {
+        let newEditConfigs = state.editConfigs;
+        const layerIdx = state.flat.findIndex(l => l.id === action.id);
+        if (layerIdx >= 0) {
+            let newLayer = {...state.flat[layerIdx]};
+            if (action.metadata.editConfig) {
+                newEditConfigs = {
+                    ...newEditConfigs,
+                    [newLayer.wms_name]: {
+                        ...newEditConfigs[newLayer.wms_name],
+                        ...action.metadata.editConfig
+                    }
+                };
+            }
+            if (action.metadata.translations) {
+                newLayer.translations = deepmerge(newLayer.translations || {}, action.metadata.translations);
+                newLayer = LayerUtils.applyTranslations(newLayer, newLayer.translations);
+            }
+            const newLayers = [...state.flat];
+            newLayers[layerIdx] = newLayer;
+            return {...state, flat: newLayers, editConfigs: newEditConfigs};
+        } else {
+            return state;
+        }
     }
     case ADD_LAYER_SEPARATOR: {
-        const newLayers = LayerUtils.insertSeparator(state.flat, action.title, action.afterLayerId, action.afterSublayerPath);
+        const newLayers = LayerUtils.insertSeparator(state.flat, action.title, action.afterLayerId, action.afterSublayerPath).map(layer => {
+            if (layer.type === "wms") {
+                return {...layer, ...LayerUtils.buildWMSLayerParams(layer, state.filter)};
+            }
+            return layer;
+        });
         UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
         return {...state, flat: newLayers};
     }
@@ -178,43 +222,71 @@ export default function layers(state = defaultState, action) {
             return state;
         }
         let newLayers = state.flat;
+        let newEditConfigs = state.editConfigs;
+        let newLoading = state.loading;
         if (layer.role === LayerRole.BACKGROUND || isEmpty(action.sublayerpath)) {
-            newLayers = state.flat.filter(l => l.id !== action.layerId);
+            const position = state.flat.findIndex(l => l.id === action.layerId);
+            newLayers = [...newLayers];
+            newLayers.splice(position, 1);
+            if (
+                position > 0 && position < newLayers.length &&
+                newLayers[position - 1].url &&
+                newLayers[position - 1].url === newLayers[position].url
+            ) {
+                // Compress layers
+                newLayers = LayerUtils.implodeLayers(LayerUtils.explodeLayers(newLayers));
+            }
+            if (newEditConfigs[layer.wms_name]) {
+                newEditConfigs = {...newEditConfigs};
+                delete newEditConfigs[layer.wms_name];
+            }
+            newLoading = [...state.loading].filter(layerId => layerId !== action.layerId);
         } else {
-            newLayers = LayerUtils.removeLayer(state.flat, layer, action.sublayerpath);
+            const sublayer = LayerUtils.getSublayer(layer, action.sublayerpath);
+            const sublayernames = LayerUtils.getSublayerNames(layer);
+            // Remove edit config if it is last layer which uses it
+            if (newEditConfigs[layer.wms_name] && sublayernames.filter(sl => sl === sublayer.name).length === 1) {
+                newEditConfigs = {...newEditConfigs};
+                newEditConfigs[layer.wms_name] = {...newEditConfigs[layer.wms_name]};
+                delete newEditConfigs[layer.wms_name][sublayer.name];
+            }
+            newLayers = LayerUtils.removeLayer(state.flat, layer, action.sublayerpath).map(l => {
+                if (l.type === "wms") {
+                    return {...l, ...LayerUtils.buildWMSLayerParams(l, state.filter)};
+                } else {
+                    return l;
+                }
+            });
         }
         UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
-        return {...state, flat: newLayers};
+        return {...state, flat: newLayers, editConfigs: newEditConfigs, loading: newLoading};
     }
     case ADD_LAYER_FEATURES: {
         const layerId = action.layer.id || uuidv4();
         const newLayers = (state.flat || []).concat();
         const idx = newLayers.findIndex(layer => layer.id === layerId);
+        const addFeatures = action.features.map((f) => {
+            return !f.id ? {...f, id: f.id ?? uuidv4()} : f;
+        });
         if (idx === -1) {
-            const newFeatures = action.features.map(function(f) {
-                return {...f, id: f.id || (f.properties || {}).id || uuidv4()};
-            });
             const newLayer = {
                 ...action.layer,
                 id: layerId,
                 type: 'vector',
                 name: action.layer.name || layerId,
-                uuid: uuidv4(),
-                features: newFeatures,
+                features: addFeatures,
                 role: action.layer.role || LayerRole.USERLAYER,
                 queryable: action.layer.queryable || false,
                 visibility: action.layer.visibility || true,
                 opacity: action.layer.opacity || 255,
                 layertreehidden: action.layer.layertreehidden || action.layer.role > LayerRole.USERLAYER,
-                bbox: VectorLayerUtils.computeFeaturesBBox(action.features)
+                bbox: VectorLayerUtils.computeFeaturesBBox(action.features),
+                srcid: action.layer.srcid ?? uuidv4()
             };
             let inspos = 0;
             for (; inspos < newLayers.length && newLayer.role < newLayers[inspos].role; ++inspos);
             newLayers.splice(inspos, 0, newLayer);
         } else {
-            const addFeatures = action.features.map(f => ({
-                ...f, id: f.id || (f.properties || {}).id || uuidv4()
-            }));
             const newFeatures = action.clear ? addFeatures : [
                 ...(newLayers[idx].features || []).filter(f => !addFeatures.find(g => g.id === f.id)),
                 ...addFeatures
@@ -259,9 +331,19 @@ export default function layers(state = defaultState, action) {
             const newLayers = state.flat.slice(0);
             newLayers[themeLayerIdx] = LayerUtils.mergeSubLayers(state.flat[themeLayerIdx], action.layer);
             newLayers[themeLayerIdx].visibility = true;
-            Object.assign(newLayers[themeLayerIdx], LayerUtils.buildWMSLayerParams(newLayers[themeLayerIdx]));
+            Object.assign(newLayers[themeLayerIdx], LayerUtils.buildWMSLayerParams(newLayers[themeLayerIdx], state.filter));
             UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
-            return {...state, flat: newLayers};
+            let newEditConfigs = state.editConfigs;
+            if (action.layer.editConfig) {
+                newEditConfigs = {
+                    ...newEditConfigs,
+                    [newLayers[themeLayerIdx].wms_name]: {
+                        ...newEditConfigs[newLayers[themeLayerIdx].wms_name],
+                        ...action.layer.editConfig
+                    }
+                };
+            }
+            return {...state, flat: newLayers, editConfigs: newEditConfigs};
         }
         return state;
     }
@@ -275,60 +357,64 @@ export default function layers(state = defaultState, action) {
         return {...state, flat: newLayers};
     }
     case REMOVE_ALL_LAYERS: {
-        return {...state, flat: [], swipe: null};
+        return defaultState;
     }
     case REORDER_LAYER: {
-        const newLayers = LayerUtils.reorderLayer(state.flat, action.layer, action.sublayerpath, action.direction, action.preventSplittingGroups);
+        const newLayers = LayerUtils.reorderLayer(
+            state.flat, action.layerId, action.sublayerpath, action.direction, action.preventSplittingGroups
+        ).map(layer => {
+            if (layer.type === "wms") {
+                return {...layer, ...LayerUtils.buildWMSLayerParams(layer, state.filter)};
+            } else {
+                return layer;
+            }
+        });
         UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
         return {...state, flat: newLayers};
     }
     case REPLACE_PLACEHOLDER_LAYER: {
-        let newLayers = state.flat || [];
-        if (action.layer) {
-            newLayers = newLayers.map(layer => {
-                if (layer.type === 'placeholder' && layer.id === action.id) {
-                    const newLayer = {
-                        ...layer,
-                        ...action.layer,
-                        role: layer.role,
-                        id: layer.id,
-                        uuid: layer.uuid
-                    };
-                    delete newLayer.loading;
-                    LayerUtils.addUUIDs(newLayer);
-                    if (newLayer.type === "wms") {
-                        Object.assign(newLayer, LayerUtils.buildWMSLayerParams(newLayer));
-                    }
-                    return newLayer;
-                } else {
-                    return layer;
-                }
-            });
-        } else {
-            newLayers = newLayers.filter(layer => !(layer.type === 'placeholder' && layer.id === action.id));
-        }
+        const newLayers = LayerUtils.replacePlaceholderLayer(state.flat, action.id, action.layer, state.filter);
         UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
-        return {...state, flat: newLayers};
+        let newEditConfigs = state.editConfigs;
+        if (action.layer.editConfig && action.layer.wms_name) {
+            newEditConfigs = {
+                ...newEditConfigs,
+                [action.layer.wms_name]: {
+                    ...newEditConfigs[action.layer.wms_name],
+                    ...action.layer.editConfig
+                }
+            };
+        }
+        return {...state, flat: newLayers, editConfigs: newEditConfigs};
     }
     case SET_SWIPE: {
         return {...state, swipe: action.swipe};
     }
-    case SET_LAYERS: {
-        return {...state, flat: action.layers};
-    }
     case SET_FILTER: {
-        return {...state, flat: state.flat.map(layer => {
-            if (layer.type === 'wms' && layer.serverType === 'qgis') {
-                const newLayer = {
-                    ...layer,
-                    filterParams: action.filter
-                };
-                Object.assign(newLayer, LayerUtils.buildWMSLayerParams(newLayer));
-                return newLayer;
+        const filter = {
+            filterParams: action.filter,
+            filterGeom: action.filterGeom,
+            timeRange: action.timeRange
+        };
+        const newLayers = state.flat.map(layer => {
+            if (layer.type === "wms") {
+                return {...layer, ...LayerUtils.buildWMSLayerParams(layer, filter)};
+            }
+            return layer;
+        });
+        return {...state, flat: newLayers, filter: filter};
+    }
+    case SET_THEME_LAYERS_VISIBILITY_PRESET: {
+        const newLayers = state.flat.map(layer => {
+            if (layer.role === LayerRole.THEME) {
+                const newLayer = LayerUtils.applyVisibilityPreset(layer, action.preset);
+                return {...newLayer, ...LayerUtils.buildWMSLayerParams(newLayer, state.filter)};
             } else {
                 return layer;
             }
-        })};
+        });
+        UrlParams.updateParams({l: LayerUtils.buildWMSLayerUrlParam(newLayers)});
+        return {...state, flat: newLayers};
     }
     default:
         return state;

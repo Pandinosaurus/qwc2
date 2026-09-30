@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -15,9 +15,9 @@ import mvtLayer from './MVTLayer';
 import osmLayer from './OSMLayer';
 import overlayLayer from './OverlayLayer';
 import vectorLayer from './VectorLayer';
+import wfsLayer from './WFSLayer';
 import wmsLayer from './WMSLayer';
 import wmtsLayer from './WMTSLayer';
-import wfsLayer from './WFSLayer';
 import xyzLayer from './XYZLayer';
 
 export default {

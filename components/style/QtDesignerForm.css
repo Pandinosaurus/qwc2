@@ -1,11 +1,7 @@
 div.qt-designer-form {
     overflow: auto;
+    margin-bottom: 0.25em;
 }
-
-div.qt-designer-form textarea {
-    height: 100%;
-}
-
 div.qt-designer-form label > input {
     margin-right: 0.25em;
 }
@@ -20,7 +16,6 @@ div.qt-designer-layout-grid {
 div.qt-designer-layout-grid > div {
     display: flex;
     align-items: center;
-    min-width: 0;
 }
 
 div.qt-designer-layout-grid > div > *:not(.qt-designer-form-vline) {
@@ -73,40 +68,42 @@ div.qt-designer-form-frame {
 }
 
 div.qt-designer-form-tabbar {
-    overflow-x: auto;
-}
-
-div.qt-designer-form-tabbar > span {
-    padding: 0.25em;
-    border-left: 1px solid var(--border-color);
-    border-top: 1px solid var(--border-color);
-    display: inline-block;
-    background-color: var(--button-bg-color);
-    height: 2em;
-    display: inline-flex;
-    align-items: center;
-}
-
-div.qt-designer-form-tabbar > span:last-child {
-    border-right: 1px solid var(--border-color);
-}
-
-div.qt-designer-form-tabbar > span.qt-designer-form-tab-active {
-    background-color: var(--button-bg-color-active);
-    color: var(--button-text-color-active);
+    margin-bottom: -1px;
 }
 
 div.qt-designer-widget-relation {
     height: 100%;
     display: flex;
     flex-direction: column;
+    position: relative;
+    max-height: 6.5em;
+}
+
+div.qt-designer-widget-relation-resize-handle {
+    touch-action: none;
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 0;
+    height: 0;
+    border-bottom: 10px solid var(--border-color);
+    border-left: 10px solid transparent;
+    z-index: 1;
+    cursor: ns-resize;
+}
+
+div.qt-designer-form-frame > div.qt-designer-widget-relation > div.qt-designer-widget-relation-resize-handle {
+    right: calc(-0.25em + 1px);
+    bottom: calc(-0.25em + 1px);
 }
 
 div.qt-designer-widget-relation-table-container {
     overflow-y: auto;
     flex: 1 1 auto;
-    height: 4.5em;
     position: relative;
+    border-top: 1px solid var(--border-color);
+    border-left: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
 }
 
 div.qt-designer-widget-relation-table-loading {
@@ -129,7 +126,6 @@ div.qt-designer-widget-relation-table-loading > div.spinner {
 
 div.qt-designer-widget-relation-table-container > table {
     width: 100%;
-    border: 1px solid var(--border-color);
 }
 
 div.qt-designer-widget-relation-table-container > table td {
@@ -138,8 +134,13 @@ div.qt-designer-widget-relation-table-container > table td {
 }
 
 div.qt-designer-widget-relation-table-container > table td.qt-designer-widget-relation-record-icon {
-    width: 1px;
+    width: 1.5em;
 }
+
+td.qt-designer-widget-relation-record-icon > span.icon-trash:hover {
+    color: red;
+}
+
 div.qt-designer-widget-relation-table-container > table td.qt-designer-widget-relation-row-widget > * {
     width: 100%;
 }
@@ -165,10 +166,11 @@ tr.qt-designer-widget-relation-record-deleted {
 
 div.qt-designer-widget-relation-buttons {
     flex: 0 0 auto;
+    display: flex;
 }
 
-button.qt-designer-widget-relation-add {
-    width: 100%;
+div.qt-designer-widget-relation-buttons > button {
+    flex: 1 1 auto;
 }
 
 div.qt-designer-form label {
@@ -176,16 +178,22 @@ div.qt-designer-form label {
     align-items: center;
 }
 
-div.qt-designer-form-featurelink-buttons {
-    display: flex;
+div.qt-designer-form div.text-input-wrapper-multiline {
+    height: 100%;
 }
 
-div.qt-designer-form-featurelink-buttons > div.ButtonBar {
-    flex: 1 1 auto;
+div.qt-designer-form-featurelink-buttons {
+    display: flex;
+    align-items: center;
 }
 
 div.qt-designer-form-featurelink-buttons > button.button {
-    margin: 0.25em 0;
+    flex: 1 1 auto;
+}
+
+div.qt-designer-form-featurelink-buttons > button.qt-designer-form-featurelink-clear {
+    flex: 0 0 auto;
+    margin: 0 0.25em;
 }
 
 div.qt-designer-report {
@@ -193,7 +201,6 @@ div.qt-designer-report {
 }
 
 div.qt-designer-report input,
-div.qt-designer-report textarea,
 div.qt-designer-report select {
     border: none!important;
     outline: none!important;

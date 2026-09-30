@@ -1,0 +1,77 @@
+/**
+ * Copyright Sourcepole AG
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+import ColorLayer from '@giro3d/giro3d/core/layer/ColorLayer';
+import TiledImageSource from '@giro3d/giro3d/sources/TiledImageSource.js';
+import ol from 'openlayers';
+
+import {wmsImageLoadFunction, wmsToOpenlayersOptions, getClientSideOpacity} from '../../map/layers/WMSLayer';
+import {Layer3D} from './Layer3D';
+
+
+export default {
+    create3d: (options, projection) => {
+        const queryParameters = {...wmsToOpenlayersOptions(options), __t: +new Date()};
+        const clientSideOpacity = getClientSideOpacity(options, queryParameters);
+        const layer = new Layer3D(options.id, new ColorLayer({
+            name: options.name,
+            opacity: clientSideOpacity ?? 1,
+            source: new TiledImageSource({
+                source: new ol.source.TileWMS({
+                    url: options.url.split("?")[0],
+                    params: queryParameters,
+                    version: options.version,
+                    projection: projection,
+                    tileLoadFunction: (imageTile, src) => wmsImageLoadFunction(imageTile.getImage(), src)
+                })
+            })
+        }));
+        layer.layer().visible = queryParameters.LAYERS !== "" && options.visibility;
+        return layer;
+    },
+    update3d: (mapLayer, newOptions, oldOptions, projection) => {
+        const layer = mapLayer.layer();
+        const source = layer.source.source;
+        if (oldOptions && source.updateParams) {
+            let changed = (oldOptions.rev || 0) !== (newOptions.rev || 0);
+            const oldParams = wmsToOpenlayersOptions(oldOptions);
+            getClientSideOpacity(oldOptions, oldParams); // Make getClientSideOpacity transform oldParams if necessary
+            const newParams = wmsToOpenlayersOptions(newOptions);
+            const clientSideOpacity = getClientSideOpacity(newOptions, newParams);
+            Object.keys(oldParams).forEach(key => {
+                if (!(key in newParams)) {
+                    newParams[key] = undefined;
+                }
+            });
+            if (!changed) {
+                changed = Object.keys(newParams).find(key => {
+                    return newParams[key] !== oldParams[key];
+                }) !== undefined;
+            }
+            changed |= newOptions.visibility !== oldOptions.visibility;
+            if (changed) {
+                const queryParameters = {...newParams,  __t: +new Date()};
+                if (layer.__updateTimeout) {
+                    clearTimeout(layer.__updateTimeout);
+                }
+                if (!newOptions.visibility || queryParameters.LAYERS === "") {
+                    layer.visible = false;
+                }
+                layer.opacity = clientSideOpacity ?? 1;
+                layer.__updateTimeout = setTimeout(() => {
+                    layer.visible = queryParameters.LAYERS !== "" && newOptions.visibility;
+                    source.updateParams(queryParameters);
+                    layer.source.update();
+                    layer.__updateTimeout = null;
+                }, 500);
+            } else {
+                layer.opacity = clientSideOpacity ?? 1;
+            }
+        }
+    }
+};

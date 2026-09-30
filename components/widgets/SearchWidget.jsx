@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,32 +8,50 @@
 
 
 import React from 'react';
-import PropTypes from 'prop-types';
+
 import axios from 'axios';
-import {v1 as uuidv1} from 'uuid';
 import isEmpty from 'lodash.isempty';
-import Spinner from '../Spinner';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import LocaleUtils from '../../utils/LocaleUtils';
-import MiscUtils from '../../utils/MiscUtils';
+import {SearchResultType} from '../../utils/SearchProviders';
+import VectorLayerUtils from '../../utils/VectorLayerUtils';
+import Icon from '../Icon';
+import InputContainer from './InputContainer';
+import PopupMenu from './PopupMenu';
+import Spinner from './Spinner';
+
 import './style/SearchWidget.css';
+
 
 export default class SearchWidget extends React.Component {
     static propTypes = {
         className: PropTypes.string,
-        onBlur: PropTypes.func,
-        onFocus: PropTypes.func,
         placeholder: PropTypes.string,
-        resultSelected: PropTypes.func,
-        searchParams: PropTypes.object,
+        queryGeometries: PropTypes.bool,
+        renderGroupTitle: PropTypes.func,
+        renderItem: PropTypes.func,
+        resultSelected: PropTypes.func.isRequired,
+        resultTypeFilter: PropTypes.array,
+        searchParams: PropTypes.shape({
+            mapcrs: PropTypes.string.isRequired,
+            displaycrs: PropTypes.string.isRequired
+        }),
         searchProviders: PropTypes.array,
         value: PropTypes.string
+    };
+    static defaultProps = {
+        resultTypeFilter: [SearchResultType.PLACE],
+        searchParams: {},
+        searchProviders: []
     };
     state = {
         text: '',
         reqId: null,
         results: [],
         pending: 0,
-        active: false
+        resultsVisible: false
     };
     constructor(props) {
         super(props);
@@ -42,6 +60,9 @@ export default class SearchWidget extends React.Component {
         this.state.text = props.value;
         this.input = null;
     }
+    componentDidMount() {
+        this.componentDidUpdate({});
+    }
     componentDidUpdate(prevProps) {
         if (this.props.value !== prevProps.value) {
             this.setState({text: this.props.value});
@@ -49,42 +70,52 @@ export default class SearchWidget extends React.Component {
     }
     render() {
         return (
-            <div className={"search-widget-container " + (this.props.className || "")}>
-                <input
-                    className="search-widget-input"
-                    onBlur={this.onBlur}
-                    onChange={this.textChanged}
-                    onFocus={this.onFocus}
-                    onKeyDown={this.onKeyDown}
-                    placeholder={this.props.placeholder ?? LocaleUtils.tr("search.search")}
-                    ref={el => {this.input = el;}}
-                    type="text"
-                    value={this.state.text} />
-                {this.state.pending > 0 ? (<Spinner />) : null}
-                {(!isEmpty(this.state.results) || this.state.pending > 0) && this.state.active ? this.renderResults() : null}
+            <div className="search-widget-container">
+                <InputContainer>
+                    <input
+                        onChange={this.textChanged}
+                        onClick={() => this.setState({resultsVisible: true})}
+                        onFocus={this.onFocus}
+                        onKeyDown={this.onKeyDown}
+                        placeholder={this.props.placeholder ?? LocaleUtils.tr("search.search")}
+                        ref={el => {this.input = el;}}
+                        role="input"
+                        type="text"
+                        value={this.state.text} />
+                    {this.state.pending > 0 ? (<Spinner role="suffix" />) : (<Icon icon="clear" onClick={this.clear} role="suffix" />)}
+                </InputContainer>
+                {(!isEmpty(this.state.results) || this.state.pending > 0) && this.state.resultsVisible ? this.renderResults() : null}
             </div>
         );
     }
     renderResults = () => {
+        const renderItem = this.props.renderItem ?? this.renderItem;
+        const renderGroupTitle = this.props.renderGroupTitle ?? this.renderGroupTitle;
         return (
-            <div className="search-widget-results" onMouseDown={this.setPreventBlur}>
-                {this.state.results.map(group => (
-                    <div className="search-widget-results-group" key={group.id} onMouseDown={MiscUtils.killEvent}>
-                        <div className="search-widget-results-group-title">{group.titlemsgid ? LocaleUtils.tr(group.titlemsgid) : (<span>{group.title}</span>)}</div>
-                        {group.items.map(item => {
-                            item.text = (item.label !== undefined ? item.label : item.text || '').replace(/<\/?\w+\s*\/?>/g, '');
-                            return (
-                                <div className="search-widget-results-group-item" key={item.id} onClick={() => this.resultSelected(item)} title={item.text}>{item.text}</div>
-                            );
-                        })}
-                    </div>
-                ))}
+            <PopupMenu anchor={this.input} className="search-widget-results" onClose={() => this.setState({resultsVisible: false})} setMaxWidth spaceKeyActivation={false}>
+                {this.state.results.filter(group => this.props.resultTypeFilter.includes(group.type ?? SearchResultType.PLACE)).map(group => {
+                    return [
+                        renderGroupTitle(group),
+                        group.items.map(item => {
+                            const text = (item.label !== undefined ? item.label : item.text || '').replace(/<\/?\w+\s*\/?>/g, '');
+                            return renderItem(group, {...item, text: text});
+                        })
+                    ];
+                }).flat()}
+            </PopupMenu>
+        );
+    };
+    renderGroupTitle = (group) => {
+        return (
+            <div className="search-widget-results-group-title" disabled key={group.id}>
+                <span>{group.title ?? LocaleUtils.tr(group.titlemsgid)}</span>
             </div>
         );
     };
-    setPreventBlur = () => {
-        this.preventBlur = true;
-        setTimeout(() => {this.preventBlur = false; return false;}, 100);
+    renderItem = (group, item) => {
+        return (
+            <div className="search-widget-results-item" key={group.id + ":" + item.id} onClick={() => this.resultSelected(group, item)} title={item.text}>{item.text}</div>
+        );
     };
     textChanged = (ev) => {
         this.setState({text: ev.target.value, reqId: null, results: [], pending: 0});
@@ -95,48 +126,65 @@ export default class SearchWidget extends React.Component {
             this.searchTimeout = setTimeout(this.startSearch, 250);
         }
     };
-    onBlur = () => {
-        if (!this.preventBlur) {
-            clearTimeout(this.searchTimeout);
-            this.props.onBlur();
-            this.setState({active: false, text: this.props.value, reqId: null, results: [], pending: 0});
+    onFocus = (ev) => {
+        if (this.input && !this.state.resultsVisible) {
+            ev.target.select();
         }
     };
-    onFocus = (ev) => {
-        ev.target.select();
-        this.props.onFocus();
-        this.setState({active: true});
-    };
     onKeyDown = (ev) => {
-        if (ev.keyCode === 13) {
+        if (ev.key === 'Enter') {
             this.startSearch();
-        } else if (ev.keyCode === 27) {
-            ev.target.blur();
+        } else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+            ev.preventDefault();
+            this.setState({resultsVisible: true});
         }
     };
     startSearch = () => {
         clearTimeout(this.searchTimeout);
-        const reqId = uuidv1();
+        const reqId = uuidv4();
         this.setState({reqId: reqId, results: [], pending: this.props.searchProviders.length});
 
         this.props.searchProviders.forEach(provider => {
-            provider.onSearch(this.state.text, this.props.searchParams, (response) => {
+            const searchParams = {
+                lang: LocaleUtils.lang(),
+                cfgParams: provider.cfgParams,
+                ...provider.params,
+                ...this.props.searchParams
+            };
+            provider.onSearch(this.state.text, searchParams, (response) => {
                 this.setState((state) => {
                     if (state.reqId !== reqId) {
                         return {};
                     }
                     return {
-                        results: [...state.results, ...response.results],
-                        pending: state.pending - 1
+                        results: [...state.results, ...response.results.map(group => ({...group, provider}))],
+                        pending: state.pending - 1,
+                        resultsVisible: true
                     };
                 });
             }, axios);
         });
     };
-    resultSelected = (item) => {
-        this.props.resultSelected(item);
-        if (this.input) {
-            this.input.blur();
+    resultSelected = (group, item) => {
+        if (!item.geometry && group.provider.getResultGeometry) {
+            group.provider.getResultGeometry(item, (response) => {
+                this.props.resultSelected({
+                    ...item,
+                    feature: response ? VectorLayerUtils.reprojectFeature(response.feature, response.crs, item.crs) : null,
+                    x: item.x ?? (response?.center?.[0]),
+                    y: item.y ?? (response?.center?.[1]),
+                    crs: item.crs ?? response?.crs
+                });
+            });
+        } else {
+            this.props.resultSelected({
+                ...item,
+                feature: item.geometry ? {type: "Feature", geometry: item.geometry} : null
+            });
         }
+    };
+    clear = () => {
+        this.setState({results: [], text: "", resultsVisible: false});
+        this.props.resultSelected(null);
     };
 }

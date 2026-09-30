@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,9 +7,14 @@
  */
 
 import React from 'react';
+
+import classNames from 'classnames';
 import PropTypes from 'prop-types';
-import Icon from '../Icon';
+
 import LocaleUtils from '../../utils/LocaleUtils';
+import Icon from '../Icon';
+import ComboBox from './ComboBox';
+
 import './style/NavBar.css';
 
 
@@ -21,10 +26,12 @@ export default class NavBar extends React.Component {
         pageChanged: PropTypes.func,
         pageSize: PropTypes.number,
         pageSizeChanged: PropTypes.func,
-        pageSizes: PropTypes.array
+        pageSizes: PropTypes.array,
+        selectedPages: PropTypes.array
     };
     static defaultProps = {
-        pageSizes: [10, 25, 50, 100]
+        pageSizes: [10, 25, 50, 100],
+        selectedPages: []
     };
     render() {
         const pages = [this.props.currentPage];
@@ -47,21 +54,23 @@ export default class NavBar extends React.Component {
             pages[pages.length - 1] = -1;
         }
         return (
-            <div className="navbar">
-                <button className="button" disabled={this.props.currentPage <= 0 || this.props.disabled} onClick={() => this.props.pageChanged(this.props.currentPage - 1)}>
+            <div className="navbar controlgroup">
+                <button className="button" disabled={this.props.currentPage <= 0 || this.props.disabled} onClick={() => this.props.pageChanged(this.props.currentPage - 1)} title={LocaleUtils.tr("navbar.prev")}>
                     <Icon icon="chevron-left" />
                 </button>
                 {(pages[0] > 0 || pages[0] === -1) ? this.pageButton(0) : null}
                 {pages.map(this.pageButton)}
                 {pages[pages.length - 1] < this.props.nPages - 1 ? this.pageButton(this.props.nPages - 1) : null}
-                <button className="button" disabled={this.props.currentPage >= this.props.nPages - 1 || this.props.disabled} onClick={() => this.props.pageChanged(this.props.currentPage + 1)}>
+                <button className="button" disabled={this.props.currentPage >= this.props.nPages - 1 || this.props.disabled} onClick={() => this.props.pageChanged(this.props.currentPage + 1)} title={LocaleUtils.tr("navbar.next")}>
                     <Icon icon="chevron-right" />
                 </button>
-                <select disabled={this.props.disabled} onChange={ev => this.props.pageSizeChanged(parseInt(ev.target.value, 10))} value={this.props.pageSize}>
-                    {this.props.pageSizes.map(pageSize => (
-                        <option key={pageSize} value={pageSize}>{pageSize} {LocaleUtils.tr("navbar.perpage")}</option>
-                    ))}
-                </select>
+                {this.props.pageSizes.length > 1 ? (
+                    <ComboBox disabled={this.props.disabled} onChange={value => this.props.pageSizeChanged(parseInt(value, 10))} value={this.props.pageSize}>
+                        {this.props.pageSizes.map(pageSize => (
+                            <div key={pageSize} value={pageSize}>{pageSize} {LocaleUtils.tr("navbar.perpage")}</div>
+                        ))}
+                    </ComboBox>
+                ) : null}
             </div>
         );
     }
@@ -69,7 +78,11 @@ export default class NavBar extends React.Component {
         if (page === -1) {
             return <span className="navbar-dots" key={idx}>...</span>;
         }
-        const className = "button" + (page === this.props.currentPage ? " pressed" : "");
+        const className = classNames({
+            button: true,
+            pressed: page === this.props.currentPage,
+            selected: this.props.selectedPages.includes(page)
+        });
         return (
             <button className={className} disabled={this.props.disabled} key={idx} onClick={() => this.props.pageChanged(page)}>
                 {page + 1}

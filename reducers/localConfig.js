@@ -1,20 +1,26 @@
 /**
  * Copyright 2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import {LOCAL_CONFIG_LOADED, SET_STARTUP_PARAMETERS, SET_COLOR_SCHEME, SET_USER_INFO_FIELDS} from '../actions/localConfig';
-
+import {
+    LOCAL_CONFIG_LOADED, SET_STARTUP_PARAMETERS,
+    SET_COLOR_SCHEME, SET_USER_INFO_FIELDS,
+    REGISTER_CUSTOM_PLUGIN,
+    UNREGISTER_CUSTOM_PLUGIN
+} from '../actions/localConfig';
 import ConfigUtils from '../utils/ConfigUtils';
 import {UrlParams} from '../utils/PermaLinkUtils';
 
 const defaultState = {
     ...ConfigUtils.getDefaults(),
+    customPlugins: [],
     startupParams: {},
+    startupState: {},
     colorScheme: 'default'
 };
 
@@ -24,7 +30,7 @@ export default function localConfig(state = defaultState, action) {
         return {...state, ...action.config};
     }
     case SET_STARTUP_PARAMETERS: {
-        return {...state, startupParams: action.params};
+        return {...state, startupParams: action.params, startupState: action.state};
     }
     case SET_COLOR_SCHEME: {
         const root = document.querySelector(':root');
@@ -50,6 +56,32 @@ export default function localConfig(state = defaultState, action) {
                 ...state.user_infos,
                 ...action.fields
             }
+        };
+    }
+    case REGISTER_CUSTOM_PLUGIN: {
+        return {
+            ...state,
+            customPlugins: [...state.customPlugins, ...action.name],
+            plugins: {
+                desktop: state.plugins.desktop.map(entry => {
+                    if (entry.name === action.name) {
+                        return {...entry, availableIn3D: action.availableIn3D};
+                    }
+                    return entry;
+                }),
+                mobile: state.plugins.mobile.map(entry => {
+                    if (entry.name === action.name) {
+                        return {...entry, availableIn3D: action.availableIn3D};
+                    }
+                    return entry;
+                })
+            }
+        };
+    }
+    case UNREGISTER_CUSTOM_PLUGIN: {
+        return {
+            ...state,
+            customPlugins: state.customPlugins.filter(el => el !== action.name)
         };
     }
     default:

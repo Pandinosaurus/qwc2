@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,12 +7,16 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+
 import dayjs from 'dayjs';
+import PropTypes from 'prop-types';
+
+import LocaleUtils from '../../utils/LocaleUtils';
+import MiscUtils from '../../utils/MiscUtils';
 import Icon from '../Icon';
 import ButtonBar from '../widgets/ButtonBar';
 import NumberInput from '../widgets/NumberInput';
-import LocaleUtils from '../../utils/LocaleUtils';
+
 import './style/InfiniteTimeline.css';
 
 
@@ -48,9 +52,9 @@ export default class InfiniteTimeline extends React.Component {
     }
     render() {
         const navButtons = [
-            {key: "home", tooltip: LocaleUtils.trmsg("timemanager.home"), icon: "home"},
-            {key: "zoomout", tooltip: LocaleUtils.trmsg("timemanager.zoomout"), icon: "zoomout"},
-            {key: "zoomin", tooltip: LocaleUtils.trmsg("timemanager.zoomin"), icon: "zoomin"}
+            {key: "home", tooltip: LocaleUtils.tr("timemanager.home"), icon: "home"},
+            {key: "zoomout", tooltip: LocaleUtils.tr("common.zoomout"), icon: "zoomout"},
+            {key: "zoomin", tooltip: LocaleUtils.tr("common.zoomin"), icon: "zoomin"}
         ];
 
         return (
@@ -59,21 +63,21 @@ export default class InfiniteTimeline extends React.Component {
                     <ButtonBar buttons={navButtons} onClick={this.navButtonClicked} />
                     <div className="inftimeline-toolbar-block">
                         <span>{LocaleUtils.tr("timemanager.timelinescale")}: &nbsp;</span>
+                        <NumberInput decimals={2} max={10} min={0.01} mobile onChange={this.setTimeScalePast} value={this.state.timeScalePast} />
                         <Icon icon="before" title={LocaleUtils.tr("timemanager.past")} />
-                        <NumberInput decimals={2} max={10} min={0.01} onChange={this.setTimeScalePast} value={this.state.timeScalePast} />
                         <Icon icon="after" title={LocaleUtils.tr("timemanager.future")} />
-                        <NumberInput decimals={2} max={10} min={0.01} onChange={this.setTimeScaleFuture} value={this.state.timeScaleFuture} />
+                        <NumberInput decimals={2} max={10} min={0.01} mobile onChange={this.setTimeScaleFuture} value={this.state.timeScaleFuture} />
                     </div>
                     <div className="inftimeline-toolbar-spacer" />
                 </div>
                 <div className="inftimeline-clip">
-                    <button className="button inftimeline-pan-left" onMouseDown={() => this.pan(-20)}>
+                    <button className="button inftimeline-pan-left" onContextMenu={MiscUtils.killEvent} onPointerDown={() => this.pan(-20)}>
                         <Icon icon="chevron-left" />
                     </button>
                     <div className="inftimeline-ticks">
                         {this.renderTicks()}
                     </div>
-                    <button className="button inftimeline-pan-right" onMouseDown={() => this.pan(20)}>
+                    <button className="button inftimeline-pan-right" onContextMenu={MiscUtils.killEvent} onPointerDown={() => this.pan(20)}>
                         <Icon icon="chevron-right" />
                     </button>
                 </div>
@@ -204,7 +208,7 @@ export default class InfiniteTimeline extends React.Component {
                 this.setState((state) => ({panOffset: state.panOffset + offset}));
             }, 50);
         }, 250);
-        document.addEventListener("mouseup", () => {
+        document.addEventListener("pointerup", () => {
             clearInterval(panInterval);
             clearTimeout(panTimeout);
         }, {once: true, capture: true});

@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,6 +8,7 @@
  */
 
 import React from 'react';
+
 import ol from 'openlayers';
 
 let layersMap;

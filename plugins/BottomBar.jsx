@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,19 +7,23 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import {createSelector} from 'reselect';
-import pickBy from 'lodash.pickby';
-import {changeMousePositionState} from '../actions/mousePosition';
-import {changeZoomLevel, setBottombarHeight} from '../actions/map';
-import {openExternalUrl} from '../actions/task';
+
+import ol from 'openlayers';
+import PropTypes from 'prop-types';
+
+import {setThemeLayersVisibilityPreset} from '../actions/layers';
+import {changeZoomLevel, setDisplayCrs} from '../actions/map';
+import {openExternalUrl, setBottombarHeight} from '../actions/windows';
 import CoordinateDisplayer from '../components/CoordinateDisplayer';
-import InputContainer from '../components/InputContainer';
-import displayCrsSelector from '../selectors/displaycrs';
+import GroupSelect from '../components/widgets/GroupSelect';
+import InputContainer from '../components/widgets/InputContainer';
+import NumberInput from '../components/widgets/NumberInput';
 import CoordinatesUtils from '../utils/CoordinatesUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import MapUtils from '../utils/MapUtils';
+import {VisibilityPresetsInterface} from "../utils/PermaLinkUtils";
+
 import './style/BottomBar.css';
 
 
@@ -28,18 +32,38 @@ import './style/BottomBar.css';
  */
 class BottomBar extends React.Component {
     static propTypes = {
+        /** Additional bottombar links.`side` can be `left` or `right` (default). */
+        additionalBottomBarLinks: PropTypes.arrayOf(PropTypes.shape({
+            label: PropTypes.string,
+            labelMsgId: PropTypes.string,
+            side: PropTypes.string,
+            url: PropTypes.string,
+            urlTarget: PropTypes.string,
+            icon: PropTypes.string
+        })),
         additionalMouseCrs: PropTypes.array,
-        changeMousePositionState: PropTypes.func,
+        bookmarks: PropTypes.array,
         changeZoomLevel: PropTypes.func,
+        /** Custom coordinate formatter, as `(coordinate, crs) => string`. */
+        coordinateFormatter: PropTypes.func,
+        currentTheme: PropTypes.object,
         /** Whether to display the coordinates in the bottom bar. */
         displayCoordinates: PropTypes.bool,
+        /** Whether to show a quick-select dropdown for bookmarks and visibility presets of the currently active theme. */
+        displayQuickSelectDropdown: PropTypes.bool,
+        /** Whether to display the scalebar in the bottom bar. */
+        displayScalebar: PropTypes.bool,
         /** Whether to display the scale in the bottom bar. */
         displayScales: PropTypes.bool,
-        displaycrs: PropTypes.string,
         fullscreen: PropTypes.bool,
         map: PropTypes.object,
+        mapMargins: PropTypes.object,
         openExternalUrl: PropTypes.func,
+        /** See [OpenLayers API doc](https://openlayers.org/en/latest/apidoc/module-ol_control_ScaleLine-ScaleLine.html) */
+        scalebarOptions: PropTypes.object,
         setBottombarHeight: PropTypes.func,
+        setDisplayCrs: PropTypes.func,
+        setThemeLayersVisibilityPreset: PropTypes.func,
         /** The URL of the terms label anchor. */
         termsUrl: PropTypes.string,
         /** Icon of the terms inline window. Relevant only when `termsUrlTarget` is `iframe`. */
@@ -51,115 +75,158 @@ class BottomBar extends React.Component {
         /** Icon of the viewer title inline window. Relevant only when `viewertitleUrl` is `iframe`. */
         viewertitleUrlIcon: PropTypes.string,
         /** The target where to open the viewer title URL. If `iframe`, it will be displayed in an inline window, otherwise in a new tab. You can also use the `:iframedialog:<dialogname>:<options>` syntax to set up the inline window. */
-        viewertitleUrlTarget: PropTypes.string
+        viewertitleUrlTarget: PropTypes.string,
+        visibilityPresets: PropTypes.array
     };
     static defaultProps = {
         displayCoordinates: true,
+        displayQuickSelectDropdown: false,
+        displayScalebar: true,
         displayScales: true
     };
     state = {
         scale: 0
     };
-    componentDidMount() {
-        this.props.changeMousePositionState({crs: this.props.map.projection});
+    componentWillUnmount() {
+        if (this.scalebar) {
+            MapUtils.getHook(MapUtils.GET_MAP)?.removeControl?.(this.scalebar);
+        }
     }
     componentDidUpdate(prevProps) {
-        if (this.props.map.projection !== prevProps.map.projection) {
-            this.props.changeMousePositionState({crs: this.props.map.projection, position: null});
-        }
         if (this.props.map !== prevProps.map) {
             this.setState({scale: Math.round(MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom))});
         }
     }
     render() {
-        if (this.props.fullscreen) {
-            return null;
+        const widgets = [];
+        if (this.props.displayScalebar) {
+            widgets.push((<div className="bottombar-scalebar-container" key="scalebar" ref={this.initScaleBar} />));
         }
+        if (!this.props.fullscreen) {
+            const leftBottomLinks = (this.props.additionalBottomBarLinks || []).filter(entry => entry.side === "left").map(this.renderLink);
+            widgets.push((<span className="bottombar-links" key="leftlinks">{leftBottomLinks}</span>));
+            widgets.push((<span className="bottombar-spacer" key="spacer1" />));
 
-        let viewertitleLink;
-        if (this.props.viewertitleUrl) {
-            viewertitleLink = (
-                <a href={this.props.viewertitleUrl} onClick={(ev) => this.openUrl(ev, this.props.viewertitleUrl, this.props.viewertitleUrlTarget, LocaleUtils.tr("bottombar.viewertitle_label"), this.props.viewertitleUrlIcon)}>
-                    <span className="viewertitle_label">{LocaleUtils.tr("bottombar.viewertitle_label")}</span>
-                </a>
-            );
-        }
-        let termsLink;
-        if (this.props.termsUrl) {
-            termsLink = (
-                <a href={this.props.termsUrl} onClick={(ev) => this.openUrl(ev, this.props.termsUrl, this.props.termsUrlTarget, LocaleUtils.tr("bottombar.terms_label"), this.props.termsUrlIcon)}>
-                    <span className="terms_label">{LocaleUtils.tr("bottombar.terms_label")}</span>
-                </a>
-            );
-        }
-        let bottomLinks;
-        if (viewertitleLink || termsLink) {
-            bottomLinks = (
-                <span className="bottombar-links">
-                    {viewertitleLink}
-                    {viewertitleLink && termsLink ? (<span dangerouslySetInnerHTML={{__html: "&nbsp;|&nbsp;"}} />) : null}
-                    {termsLink}
-                </span>
-            );
-        }
-        const additionalMouseCrs = this.props.additionalMouseCrs || [];
-        const availableCRS = pickBy(CoordinatesUtils.getAvailableCRS(), (key, code) => {
-            return code === "EPSG:4326" ||
-                   code === this.props.map.projection ||
-                   additionalMouseCrs.indexOf(code) !== -1;
-        });
-        let coordinates = null;
-        if (this.props.displayCoordinates) {
-            coordinates = (
-                <span>
-                    <span>{LocaleUtils.tr("bottombar.mousepos_label")}:&nbsp;</span>
-                    <CoordinateDisplayer className={"bottombar-mousepos"} displaycrs={this.props.displaycrs} />
-                    <select onChange={ev => this.props.changeMousePositionState({crs: ev.target.value})} value={this.props.displaycrs}>
-                        {Object.keys(availableCRS).map(crs =>
-                            (<option key={crs} value={crs}>{availableCRS[crs].label}</option>)
-                        )}
-                    </select>
-                </span>
-            );
-        }
-        let scales = null;
-        if (this.props.displayScales) {
-            scales = (
-                <div>
-                    <span>{LocaleUtils.tr("bottombar.scale_label")}:&nbsp;</span>
-                    <InputContainer className="bottombar-scale-combo">
-                        <span className="bottombar-scale-combo-prefix" role="prefix"> 1 : </span>
-                        <select onChange={ev => this.props.changeZoomLevel(parseInt(ev.target.value, 10))} role="input" value={Math.round(this.props.map.zoom)}>
-                            {this.props.map.scales.map((item, index) =>
-                                (<option key={index} value={index}>{LocaleUtils.toLocaleFixed(item, 0)}</option>)
+            if (this.props.displayCoordinates) {
+                const enabledMouseCrs = [...this.props.additionalMouseCrs || [], this.props.map.projection, "EPSG:4326"];
+                const availableCRS = Object.fromEntries(Object.entries(CoordinatesUtils.getAvailableCRS()).filter(([key, value]) => {
+                    return enabledMouseCrs.includes(key);
+                }));
+                widgets.push((
+                    <div className="controlgroup" key="coordinates">
+                        <span className="bottombar-mousepos-label">{LocaleUtils.tr("bottombar.mousepos_label")}:&nbsp;</span>
+                        <CoordinateDisplayer className={"bottombar-mousepos"} coordinateFormatter={this.props.coordinateFormatter} displayCrs={this.props.map.displayCrs} mapCrs={this.props.map.projection} />
+                        <select onChange={ev => this.props.setDisplayCrs(ev.target.value)} value={this.props.map.displayCrs}>
+                            {Object.keys(availableCRS).map(crs =>
+                                (<option key={crs} value={crs}>{availableCRS[crs].label}</option>)
                             )}
                         </select>
-                        <input
-                            onBlur={ev => this.setScale(ev.target.value)}
-                            onChange={ev => this.setState({scale: ev.target.value})}
-                            onKeyUp={ev => { if (ev.keyCode === 13) this.setScale(ev.target.value); } }
-                            role="input" type="text" value={this.state.scale}/>
-                    </InputContainer>
-                </div>
-            );
+                    </div>
+                ));
+            }
+            if (this.props.displayScales) {
+                widgets.push((
+                    <div key="scales">
+                        <span className="bottombar-scales-label">{LocaleUtils.tr("bottombar.scale_label")}:&nbsp;</span>
+                        <InputContainer className="bottombar-scale-combo">
+                            <span className="bottombar-scale-combo-prefix" role="prefix"> 1 : </span>
+                            <select onChange={ev => this.props.changeZoomLevel(parseInt(ev.target.value, 10))} role="input" value={Math.round(this.props.map.zoom)}>
+                                {this.props.map.scales.map((item, index) =>
+                                    (<option key={index} value={index}>{LocaleUtils.toLocaleFixed(item, 0)}</option>)
+                                )}
+                            </select>
+                            <NumberInput decimals={0} hideArrows onChange={this.setScale} role="input"
+                                value={this.state.scale}/>
+                        </InputContainer>
+                    </div>
+                ));
+            }
+            if (this.props.displayQuickSelectDropdown &&
+                (this.props.bookmarks?.length > 0 || this.props.visibilityPresets?.length > 0)
+            ) {
+                const bookmarks = this.filterByActiveTheme(this.props.bookmarks || []);
+                const visibilityPresets = this.filterByActiveTheme(this.props.visibilityPresets || []);
+                const options = {
+                    [LocaleUtils.tr("appmenu.items.Bookmark")]: bookmarks.map(bm => ["bk:" + bm.key, bm.description]),
+                    [LocaleUtils.tr("appmenu.items.VisibilityPresets")]: visibilityPresets.map(bm => ["vp:" + bm.key, bm.description])
+                };
+                widgets.push((
+                    <div key="quickselect">
+                        <span className="bottombar-quick-select-label">{LocaleUtils.tr("bottombar.quick_select_label")}:&nbsp;</span>
+                        <GroupSelect onChange={this.openBookmarkOrPreset} options={options} placeholder={LocaleUtils.tr("common.select")} />
+                    </div>
+                ));
+            }
+            const rightBottomLinks = (this.props.additionalBottomBarLinks || []).filter(entry => entry.side !== "left").map(this.renderLink);
+            if (this.props.viewertitleUrl) {
+                const entry = {url: this.props.viewertitleUrl, urlTarget: this.props.viewertitleUrlTarget, label: LocaleUtils.tr("bottombar.viewertitle_label"), icon: this.props.viewertitleUrlIcon};
+                rightBottomLinks.push(this.renderLink(entry));
+            }
+            if (this.props.termsUrl) {
+                const entry = {url: this.props.termsUrl, urlTarget: this.props.termsUrlTarget, label: LocaleUtils.tr("bottombar.terms_label"), icon: this.props.termsUrlIcon};
+                rightBottomLinks.push(this.renderLink(entry));
+            }
+            widgets.push((<span className="bottombar-spacer" key="spacer2" />));
+            widgets.push((<span className="bottombar-links" key="rightlinks">{rightBottomLinks}</span>));
         }
 
+        const style = {
+            marginLeft: this.props.mapMargins.outerLeft + 'px',
+            marginRight: this.props.mapMargins.outerRight + 'px'
+        };
+
         return (
-            <div id="BottomBar" ref={this.storeHeight}>
-                <span className="bottombar-spacer" />
-                {coordinates}
-                {scales}
-                <span className="bottombar-spacer" />
-                {bottomLinks}
+            <div className={this.props.fullscreen ? "bottombar-fullscreen" : ""} id="BottomBar" ref={this.storeHeight} style={style}>
+                {widgets}
             </div>
         );
     }
+    renderLink = (entry) => {
+        return (
+            <a href={entry.url} key={entry.labelMsgId ?? entry.label} onClick={(ev) => this.openUrl(ev, entry.url, entry.urlTarget, entry.labelMsgId ? LocaleUtils.tr(entry.labelMsgId) : entry.label, entry.icon)}>
+                <span className="extra_label">{entry.labelMsgId ? LocaleUtils.tr(entry.labelMsgId) : entry.label}</span>
+            </a>
+        );
+    };
+    initScaleBar = (el) => {
+        this.scalebar = new ol.control.ScaleLine({
+            className: 'bottombar-scalebar',
+            target: el,
+            minWidth: 64,
+            units: 'metric',
+            ...this.props.scalebarOptions
+        });
+        MapUtils.getHook(MapUtils.GET_MAP).addControl(this.scalebar);
+    };
     openUrl = (ev, url, target, title, icon) => {
         if (target === "iframe") {
             target = ":iframedialog:externallinkiframe";
         }
         this.props.openExternalUrl(url, target, {title, icon});
         ev.preventDefault();
+    };
+    openBookmarkOrPreset = (prefixedKey) => {
+        if (prefixedKey.startsWith("vp:")) {
+            const key = prefixedKey.slice("vp:".length);
+            VisibilityPresetsInterface.resolve(key, (preset) => {
+                if (preset) {
+                    this.props.setThemeLayersVisibilityPreset(preset);
+                }
+            });
+        } else if (prefixedKey.startsWith("bk:")) {
+            const key = prefixedKey.slice("bk:".length);
+            location.href = location.href.split("?")[0] + '?bk=' + key;
+        } else {
+            /* eslint-disable-next-line */
+            console.warn("openBookmarkOrPreset: unexpected key format:", prefixedKey);
+        }
+    };
+    filterByActiveTheme = (listOfBookmarsOrPresets) => {
+        const currentTheme = this.props.currentTheme?.id ?? null;
+        if (currentTheme === null) return [];
+        return (listOfBookmarsOrPresets || []).filter((vp) =>
+            vp.theme_id !== null && String(vp.theme_id) === String(currentTheme)
+        );
     };
     setScale = (value) => {
         const scale = parseInt(value, 10);
@@ -177,18 +244,18 @@ class BottomBar extends React.Component {
     };
 }
 
-const selector = createSelector([state => state, displayCrsSelector], (state, displaycrs) => {
-    return {
-        displaycrs: displaycrs,
-        map: state.map,
-        fullscreen: state.display && state.display.fullscreen,
-        additionalMouseCrs: state.theme.current ? state.theme.current.additionalMouseCrs : []
-    };
-});
-
-export default connect(selector, {
-    changeMousePositionState: changeMousePositionState,
+export default connect((state) => ({
+    map: state.map,
+    bookmarks: state.bookmark?.bookmarks,
+    currentTheme: state.theme.current,
+    visibilityPresets: state.bookmark?.visibilityPresets,
+    fullscreen: state.display?.fullscreen,
+    mapMargins: state.windows.mapMargins,
+    additionalMouseCrs: state.theme.current?.additionalMouseCrs ?? []
+}), {
     changeZoomLevel: changeZoomLevel,
     openExternalUrl: openExternalUrl,
-    setBottombarHeight: setBottombarHeight
+    setBottombarHeight: setBottombarHeight,
+    setDisplayCrs: setDisplayCrs,
+    setThemeLayersVisibilityPreset: setThemeLayersVisibilityPreset
 })(BottomBar);

@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,10 +7,12 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
 import isEmpty from 'lodash.isempty';
 import ol from 'openlayers';
+import PropTypes from 'prop-types';
+
 import {changeRedliningPickState} from '../../actions/redliningPick';
 import FeatureStyles from "../../utils/FeatureStyles";
 
@@ -124,7 +126,7 @@ class RedliningPickSupport extends React.Component {
     searchRedliningLayer = (layerId) => {
         let redliningLayer = null;
         this.props.map.getLayers().forEach(olLayer => {
-            if (olLayer.get('msId') === layerId) {
+            if (olLayer.get('id') === layerId) {
                 redliningLayer = olLayer;
             }
         });

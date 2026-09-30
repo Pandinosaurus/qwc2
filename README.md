@@ -1,13 +1,54 @@
-QGIS Web Client 2 Components
-============================
+[![NPM Version](https://img.shields.io/npm/v/qwc2.svg?style=flat)](https://www.npmjs.com/package/qwc2)
+[![NPM Version LTS](https://img.shields.io/npm/v/qwc2-lts.svg?style=flat&label=npm%20%28LTS%29)](https://www.npmjs.com/package/qwc2-lts)
 
-QGIS Web Client 2 (QWC2) is a modular next generation responsive web client for QGIS Server, built with ReactJS and OpenLayers.
+![Logo](https://raw.githubusercontent.com/qgis/qwc2/refs/heads/master/static/assets/img/qwc-logo.svg) QGIS Web Client • [qwc.app](https://qwc.app)
+=================
 
-This repository contains the common QWC2 application components from which you can build your own personal QWC2 application.
+## Introduction
+QGIS Web Client (QWC) is a modular next generation responsive web client for QGIS Server, built with ReactJS and OpenLayers.
 
-See:
-* [qwc2-demo-app](https://github.com/qgis/qwc2-demo-app) for an example application built on top of the QWC2 components.
-* [qwc-docker](https://github.com/qwc-services/qwc-docker) for QWC2 extended with microservices.
-* [this presentation](https://blog.sourcepole.ch/assets/2019/qwc2-foss4g19.pdf) for an overview and architecture of QWC2.
+This repository contains the QWC web application, which you can run as a static application on top of QGIS Server.
 
-Please report QWC2 issues at [qwc2-demo-app/issues](https://github.com/qgis/qwc2-demo-app/issues).
+Alternatively, you can run QWC as part of the **[qwc-services Docker application](https://github.com/qwc-services/qwc-docker)**, which extends QWC with functionalities such as authentication, user management and editing.
+
+![Screenshot](https://github.com/qgis/qwc2/blob/gh-pages/Screenshot.jpg?raw=true)
+
+## Homepage
+
+See [qwc.app](https://qwc.app).
+
+## Main Features
+
+See [qwc.app/features](https://qwc.app/features).
+
+## Quick start
+
+See [docs.qwc.app/master/QuickStart/](https://docs.qwc.app/master/QuickStart/).
+
+## Documentation
+
+* [docs.qwc.app](https://docs.qwc.app)
+* [ChangeLog](https://docs.qwc.app/master/release_notes/ChangeLog/)
+
+## Help
+
+* [Issues tracker](https://github.com/qgis/qwc2/issues)
+* [Mailing list](https://lists.osgeo.org/mailman/listinfo/qgis-qwc2)
+
+## Examples
+
+Some examples of QWC production deployments:
+
+- [QWC demo instance](https://demo.qwc.app)
+- [GeoViewer Kanton Glarus](https://map.geo.gl.ch/)
+- [Web GIS Client Kanton Solothurn](https://geo.so.ch/map/)
+
+## License
+
+QWC is released under the terms of the [BSD license](https://github.com/qgis/qwc2/blob/master/LICENSE).
+
+## Building a custom application
+
+This repository contains the stock QWC application.
+
+If you want to extend QWC with custom plugins etc, you can use this repository as a submodule or the [corresponding `qwc2` NPM module](https://www.npmjs.com/package/qwc2) and build your custom application on top, see [https://github.com/qgis/qwc2-demo-app](https://github.com/qgis/qwc2-demo-app) for an example.

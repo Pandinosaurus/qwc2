@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -11,6 +11,7 @@ import layersReducer from '../reducers/layers';
 ReducerIndex.register("layers", layersReducer);
 
 import ConfigUtils from '../utils/ConfigUtils';
+import LayerUtils from '../utils/LayerUtils';
 
 export const SET_LAYER_LOADING = 'SET_LAYER_LOADING';
 export const ADD_LAYER = 'ADD_LAYER';
@@ -23,12 +24,13 @@ export const REMOVE_LAYER_FEATURES = 'REMOVE_LAYER_FEATURES';
 export const CLEAR_LAYER = 'CLEAR_LAYER';
 export const CHANGE_LAYER_PROPERTY = 'CHANGE_LAYER_PROPERTY';
 export const SET_LAYER_DIMENSIONS = 'SET_LAYER_DIMENSIONS';
+export const SET_LAYER_METADATA = 'SET_LAYER_METADATA';
 export const REFRESH_LAYER = 'REFRESH_LAYER';
 export const REMOVE_ALL_LAYERS = 'REMOVE_ALL_LAYERS';
 export const REPLACE_PLACEHOLDER_LAYER = 'REPLACE_PLACEHOLDER_LAYER';
 export const SET_SWIPE = 'SET_SWIPE';
-export const SET_LAYERS = 'SET_LAYERS';
 export const SET_FILTER = 'SET_FILTER';
+export const SET_THEME_LAYERS_VISIBILITY_PRESET = 'SET_THEME_LAYERS_VISIBILITY_PRESET';
 
 
 export const LayerRole = {
@@ -40,12 +42,19 @@ export const LayerRole = {
 };
 
 
-export function addLayer(layer, pos = null, beforename = null) {
-    return {
-        type: ADD_LAYER,
-        layer,
-        pos,
-        beforename
+export function addLayer(layer, pos = null, options = null) {
+    return dispatch => {
+        dispatch({
+            type: ADD_LAYER,
+            layer: layer,
+            pos,
+            options
+        });
+        LayerUtils.queryLayerMetadata(layer, result => dispatch({
+            type: SET_LAYER_METADATA,
+            id: layer.id,
+            metadata: result
+        }));
     };
 }
 
@@ -66,11 +75,11 @@ export function removeLayer(layerId, sublayerpath = []) {
     };
 }
 
-export function reorderLayer(layer, sublayerpath, direction) {
+export function reorderLayer(layerId, sublayerpath, direction) {
     return (dispatch, getState) => {
         dispatch({
             type: REORDER_LAYER,
-            layer,
+            layerId,
             sublayerpath,
             direction,
             preventSplittingGroups: ConfigUtils.getConfigProp("preventSplittingGroupsWhenReordering", getState().theme.current)
@@ -104,17 +113,25 @@ export function clearLayer(layerId) {
 }
 
 export function addThemeSublayer(layer) {
-    return {
-        type: ADD_THEME_SUBLAYER,
-        layer
+    return (dispatch, getState) => {
+        dispatch({
+            type: ADD_THEME_SUBLAYER,
+            layer: layer
+        });
+        const layerId = getState().layers.flat.find(l => l.role === LayerRole.THEME)?.id;
+        LayerUtils.queryLayerMetadata(layer, result => dispatch({
+            type: SET_LAYER_METADATA,
+            id: layerId,
+            metadata: result
+        }));
     };
 }
 
 // recurseDirection: null (don't recurse), 'parents', 'children', 'both'
-export function changeLayerProperty(layerUuid, property, newvalue, sublayerpath = [], recurseDirection = null) {
+export function changeLayerProperty(layerId, property, newvalue, sublayerpath = [], recurseDirection = null) {
     return {
         type: CHANGE_LAYER_PROPERTY,
-        layerUuid,
+        layerId,
         property,
         newvalue,
         sublayerpath,
@@ -175,10 +192,17 @@ export function removeAllLayers() {
 }
 
 export function replacePlaceholderLayer(id, layer) {
-    return {
-        type: REPLACE_PLACEHOLDER_LAYER,
-        id,
-        layer
+    return dispatch => {
+        dispatch({
+            type: REPLACE_PLACEHOLDER_LAYER,
+            id: id,
+            layer: layer
+        });
+        LayerUtils.queryLayerMetadata(layer, result => dispatch({
+            type: SET_LAYER_METADATA,
+            id: id,
+            metadata: result
+        }));
     };
 }
 
@@ -189,16 +213,18 @@ export function setSwipe(swipe) {
     };
 }
 
-export function setLayers(layers) {
+export function setFilter(filter, filterGeom, timeRange) {
     return {
-        type: SET_LAYERS,
-        layers
+        type: SET_FILTER,
+        filter,
+        filterGeom,
+        timeRange
     };
 }
 
-export function setFilter(filter) {
+export function setThemeLayersVisibilityPreset(preset) {
     return {
-        type: SET_FILTER,
-        filter
+        type: SET_THEME_LAYERS_VISIBILITY_PRESET,
+        preset: preset
     };
 }

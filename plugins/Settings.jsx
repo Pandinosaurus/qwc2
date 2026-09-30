@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,18 +8,20 @@
 
 import React from 'react';
 import {connect} from 'react-redux';
-import PropTypes from 'prop-types';
+
 import axios from 'axios';
 import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
 import url from 'url';
+
 import {setColorScheme, setUserInfoFields} from '../actions/localConfig';
 import SideBar from '../components/SideBar';
+import GroupSelect from "../components/widgets/GroupSelect";
 import ConfigUtils from '../utils/ConfigUtils';
-import {getUserBookmarks} from '../utils/PermaLinkUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import ThemeUtils from '../utils/ThemeUtils';
-import './style/Settings.css';
 
+import './style/Settings.css';
 
 /**
  * Settings panel.
@@ -27,7 +29,9 @@ import './style/Settings.css';
  * Allows configuring language and color scheme.
  */
 class Settings extends React.Component {
+    static availableIn3D = true;
     static propTypes = {
+        bookmarks: PropTypes.array,
         colorScheme: PropTypes.string,
         /** List of available color schemes. Value is the css class name, title/titleMsgId the display name. */
         colorSchemes: PropTypes.arrayOf(PropTypes.shape({
@@ -36,7 +40,7 @@ class Settings extends React.Component {
             value: PropTypes.string
         })),
         defaultUrlParams: PropTypes.string,
-        /** List of available languages. Value is the lang code, title/titleMsgId the display name. */
+        /** List of available languages. Value is the lang code, title/titleMsgId the display name. Falls back to the toplevel `availableLocales` `config.json` setting if not set. */
         languages: PropTypes.arrayOf(PropTypes.shape({
             title: PropTypes.string,
             titleMsgId: PropTypes.string,
@@ -48,29 +52,18 @@ class Settings extends React.Component {
         showDefaultThemeSelector: PropTypes.bool,
         /** The side of the application on which to display the sidebar. */
         side: PropTypes.string,
-        themes: PropTypes.object
+        themes: PropTypes.object,
+        visibilityPresets: PropTypes.array
     };
     static defaultProps = {
         colorSchemes: [],
-        languages: [],
+        languages: null,
         side: 'right',
         showDefaultThemeSelector: true
     };
-    state = {
-        bookmarks: {}
-    };
-    onShow = () => {
-        const username = ConfigUtils.getConfigProp("username");
-        if (this.props.showDefaultThemeSelector && username) {
-            getUserBookmarks(username, (bookmarks) => {
-                const bookmarkKeys = bookmarks.reduce((res, entry) => ({...res, [entry.key]: entry.description}), {});
-                this.setState({bookmarks: bookmarkKeys});
-            });
-        }
-    };
     render() {
         return (
-            <SideBar icon="cog" id="Settings" onShow={this.onShow} side={this.props.side} title="appmenu.items.Settings" width="25em">
+            <SideBar icon="cog" id="Settings" onShow={this.onShow} side={this.props.side} title={LocaleUtils.tr("appmenu.items.Settings")} width="25em">
                 {() => ({
                     body: this.renderBody()
                 })}
@@ -91,7 +84,13 @@ class Settings extends React.Component {
         );
     };
     renderLanguageSelector = () => {
-        if (isEmpty(this.props.languages)) {
+        let languages = this.props.languages;
+        if (!languages) {
+            languages = Object.entries(ConfigUtils.getConfigProp("availableLocales", null, {})).map(([code, title]) => ({
+                title: title, value: code
+            }));
+        }
+        if (isEmpty(languages)) {
             return null;
         }
         const lang = LocaleUtils.lang();
@@ -101,7 +100,7 @@ class Settings extends React.Component {
                 <td>
                     <select onChange={this.changeLocale} value={lang}>
                         <option key="syslang" value="">{LocaleUtils.tr("settings.systemlang")}</option>
-                        {this.props.languages.map(entry => (
+                        {languages.map(entry => (
                             <option key={entry.value} value={entry.value}>{entry.title ?? LocaleUtils.tr(entry.titleMsgId)}</option>
                         ))}
                     </select>
@@ -131,42 +130,43 @@ class Settings extends React.Component {
             return null;
         }
         const themeNames = ThemeUtils.getThemeNames(this.props.themes);
+        const bookmarks = (this.props.bookmarks || []);
+        const visibilityPresets = (this.props.visibilityPresets || []);
+        const options = {
+            [LocaleUtils.tr("settings.themes")]: Object.entries(themeNames).map(([id, name]) => ["t=" + id, name]),
+            [LocaleUtils.tr("appmenu.items.Bookmark")]: bookmarks.map(bm => ["bk=" + bm.key, bm.description]),
+            [LocaleUtils.tr("appmenu.items.VisibilityPresets")]: visibilityPresets.map(vp => ["vp=" + vp.key, vp.description])
+        };
+        const defaultOption = ["", LocaleUtils.tr("settings.default")];
         return (
             <tr>
                 <td>{LocaleUtils.tr("settings.defaulttheme")}</td>
                 <td>
-                    <select onChange={this.changeDefaultUrlParams} value={this.props.defaultUrlParams}>
-                        <option value="">{LocaleUtils.tr("settings.default")}</option>
-                        <option disabled>{LocaleUtils.tr("settings.themes")}</option>
-                        {Object.entries(themeNames).map(([id, name]) => (
-                            <option key={id} value={'t=' + id}>{name}</option>
-                        ))}
-                        <option disabled>{LocaleUtils.tr("settings.bookmarks")}</option>
-                        {Object.entries(this.state.bookmarks).map(([key, name]) => (
-                            <option key={key} value={'bk=' + key}>{name}</option>
-                        ))}
-                    </select>
+                    <GroupSelect
+                        defaultOption={defaultOption}
+                        onChange={this.changeDefaultUrlParams}
+                        options={options}
+                        value={this.props.defaultUrlParams}
+                    />
                 </td>
             </tr>
         );
     };
-    changeDefaultUrlParams = (ev) => {
+    changeDefaultUrlParams = (value) => {
         const params = {
-            default_url_params: ev.target.value
+            default_url_params: value
         };
         const baseurl = location.href.split("?")[0].replace(/\/$/, '');
         axios.get(baseurl + "/setuserinfo", {params}).then(response => {
             if (!response.data.success) {
                 /* eslint-disable-next-line */
                 alert(LocaleUtils.tr("settings.defaultthemefailed", response.data.error));
-                ev.target.value = this.props.defaultUrlParams;
             } else {
                 this.props.setUserInfoFields(response.data.fields);
             }
         }).catch((e) => {
             /* eslint-disable-next-line */
             alert(LocaleUtils.tr("settings.defaultthemefailed", String(e)));
-            ev.target.value = this.props.defaultUrlParams;
         });
     };
     changeLocale = (ev) => {
@@ -192,9 +192,11 @@ class Settings extends React.Component {
 }
 
 export default connect((state) => ({
+    bookmarks: state.bookmark?.bookmarks,
     colorScheme: state.localConfig.colorScheme,
     defaultUrlParams: state.localConfig.user_infos?.default_url_params || "",
-    themes: state.theme.themes
+    themes: state.theme.themes,
+    visibilityPresets: state.bookmark?.visibilityPresets
 }), {
     setColorScheme: setColorScheme,
     setUserInfoFields: setUserInfoFields

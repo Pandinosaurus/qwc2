@@ -1,19 +1,22 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import OlControlAttribution from 'ol/control/Attribution';
+import OlInteractionDrawRegular from 'ol-ext/interaction/DrawRegular';
+import OlInteractionTransform from 'ol-ext/interaction/Transform';
 import OlCollection from 'ol/Collection';
 import {defaults as olControlDefaults} from 'ol/control';
+import OlControlAttribution from 'ol/control/Attribution';
 import OlControlOverviewMap from 'ol/control/OverviewMap';
 import OlControlScaleLine from 'ol/control/ScaleLine';
 import OlControlZoom from 'ol/control/Zoom';
 import * as OlEventsCondition from 'ol/events/condition';
+import OlEvent from 'ol/events/Event';
 import * as OlExtent from 'ol/extent';
 import OlFeature from 'ol/Feature';
 import OlFormatGeoJSON from 'ol/format/GeoJSON';
@@ -23,43 +26,45 @@ import OlFormatGML32 from 'ol/format/GML32';
 import OlFormatKML from 'ol/format/KML';
 import OlFormatMVT from 'ol/format/MVT';
 import OlFormatWFS from 'ol/format/WFS';
+import OlFormatWKT from 'ol/format/WKT';
 import OlFormatWMSCapabilities from 'ol/format/WMSCapabilities';
 import OlFormatWMTSCapabilities from 'ol/format/WMTSCapabilities';
-import OlFormatWKT from 'ol/format/WKT';
 import OlGeolocation from 'ol/Geolocation';
 import OlGeomCircle from 'ol/geom/Circle';
 import OlGeomGeometryCollection from 'ol/geom/GeometryCollection';
+import OlGeomLineString from 'ol/geom/LineString';
+import OlGeomMultiLineString from 'ol/geom/MultiLineString';
 import OlGeomMultiPoint from 'ol/geom/MultiPoint';
+import OlGeomMultiPolygon from 'ol/geom/MultiPolygon';
 import OlGeomPoint from 'ol/geom/Point';
 import OlGeomPolygon from 'ol/geom/Polygon';
-import {fromCircle as olPolygonFromCircle} from 'ol/geom/Polygon';
-import OlGraticule from 'ol/layer/Graticule';
+import {fromCircle as olPolygonFromCircle, fromExtent as olPolygonFromExtent} from 'ol/geom/Polygon';
 import {defaults as olInteractionDefaults} from 'ol/interaction';
 import OlInteractionDoubleClickZoom from 'ol/interaction/DoubleClickZoom';
+import OlInteractionDragBox from 'ol/interaction/DragBox';
 import OlInteractionDragPan from 'ol/interaction/DragPan';
 import OlInteractionDraw from 'ol/interaction/Draw';
-import OlInteractionDrawRegular from 'ol-ext/interaction/DrawRegular';
-import OlInteractionDragBox from 'ol/interaction/DragBox';
 import {createBox as olCreateBox} from 'ol/interaction/Draw';
+import OlInteractionInteraction from 'ol/interaction/Interaction';
 import OlInteractionKeyboardPan from 'ol/interaction/KeyboardPan';
 import OlInteractionKeyboardZoom from 'ol/interaction/KeyboardZoom';
-import OlInteractionInteraction from 'ol/interaction/Interaction';
-import OlInteractionPointer from 'ol/interaction/Pointer';
 import OlInteractionModify from 'ol/interaction/Modify';
 import OlInteractionMouseWheelZoom from 'ol/interaction/MouseWheelZoom';
+import OlInteractionPointer from 'ol/interaction/Pointer';
 import OlInteractionSelect from 'ol/interaction/Select';
 import OlInteractionSnap from 'ol/interaction/Snap';
-import OlInteractionTransform from 'ol-ext/interaction/Transform';
 import OlInteractionTranslate from 'ol/interaction/Translate';
 import OlKinetic from 'ol/Kinetic';
-import OlLayer from 'ol/layer/Layer';
+import OlGraticule from 'ol/layer/Graticule';
+import OlLayerGroup from 'ol/layer/Group';
 import OlLayerImage from 'ol/layer/Image';
+import OlLayer from 'ol/layer/Layer';
 import OlLayerTile from 'ol/layer/Tile';
 import OlLayerVector from 'ol/layer/Vector';
 import OlLayerVectorTile from 'ol/layer/VectorTile';
-import OlLayerGroup from 'ol/layer/Group';
 import * as OlLoadingstrategy from 'ol/loadingstrategy';
 import OlMap from 'ol/Map';
+import OlMapBrowserEvent from 'ol/MapBrowserEvent';
 import OlObject from 'ol/Object';
 import OlOverlay from 'ol/Overlay';
 import * as OlProj from 'ol/proj';
@@ -80,10 +85,11 @@ import OlStyleRegularShape from 'ol/style/RegularShape';
 import OlStyleStroke from 'ol/style/Stroke';
 import OlStyleStyle from 'ol/style/Style';
 import OlStyleText from 'ol/style/Text';
-import OlTileQueue from 'ol/TileQueue';
 import OlTilegridTileGrid from 'ol/tilegrid/TileGrid';
 import OlTilegridWMTS from 'ol/tilegrid/WMTS';
+import OlTileQueue from 'ol/TileQueue';
 import OlView from 'ol/View';
+
 import 'ol/ol.css';
 
 
@@ -96,6 +102,7 @@ export default {
         ScaleLine: OlControlScaleLine,
         Zoom: OlControlZoom
     },
+    Event: OlEvent,
     events: {
         condition: OlEventsCondition
     },
@@ -117,10 +124,14 @@ export default {
     geom: {
         Circle: OlGeomCircle,
         GeometryCollection: OlGeomGeometryCollection,
+        LineString: OlGeomLineString,
+        MultiLineString: OlGeomMultiLineString,
         MultiPoint: OlGeomMultiPoint,
+        MultiPolygon: OlGeomMultiPolygon,
         Point: OlGeomPoint,
         Polygon: OlGeomPolygon,
-        polygonFromCircle: olPolygonFromCircle
+        polygonFromCircle: olPolygonFromCircle,
+        polygonFromExtent: olPolygonFromExtent
     },
     Graticule: OlGraticule,
     interaction: {
@@ -153,6 +164,7 @@ export default {
     },
     loadingstrategy: OlLoadingstrategy,
     Map: OlMap,
+    MapBrowserEvent: OlMapBrowserEvent,
     Object: OlObject,
     Overlay: OlOverlay,
     proj: OlProj,

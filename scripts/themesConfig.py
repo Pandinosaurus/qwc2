@@ -1,6 +1,6 @@
 #!/bin/python
 
-# Copyright 2017-2024 Sourcepole AG
+# Copyright Sourcepole AG
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
@@ -25,7 +25,7 @@ import uuid
 
 baseUrl = "http://" + socket.getfqdn()
 qwc2_path = "."
-themesConfig = os.environ.get("QWC2_THEMES_CONFIG", "themesConfig.json")
+themesConfig = os.environ.get("QWC2_THEMES_CONFIG", "static/themesConfig.json")
 
 usedThemeIds = []
 autogenExternalLayers = []
@@ -187,6 +187,8 @@ def getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, collaps
             # collect visible layers
             visibleLayers.append(name)
 
+        layerEntry['primary_key'] = getChildElementValue(layer, 'PrimaryKey/PrimaryKeyAttribute')
+
         layerEntry["queryable"] = layer.getAttribute("queryable") == "1"
         if layerEntry["queryable"] and layer.getAttribute("displayField"):
             layerEntry["displayField"] = layer.getAttribute("displayField")
@@ -226,9 +228,9 @@ def getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, collaps
         
         styles = {}
         for style in layer.getElementsByTagName("Style"):
-            name = getChildElementValue(style, "Name")
-            title = getChildElementValue(style, "Title")
-            styles[name] = title
+            style_name = getChildElementValue(style, "Name")
+            style_title = getChildElementValue(style, "Title")
+            styles[style_name] = style_title
         layerEntry["styles"] = styles
         layerEntry['style'] = 'default' if 'default' in styles else (list(styles)[0] if len(styles) > 0 else '')
 
@@ -294,6 +296,9 @@ def getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, collaps
 # parse GetCapabilities for theme
 def getTheme(config, configItem, result, resultItem):
     global autogenExternalLayers
+    if (configItem.get("disabled", False)):
+        print(f"Item {configItem.get("url")} {"(" + configItem.get("title") + ")" if configItem.get("title") else ""} has been disabled")
+        return
 
     url = update_params(urljoin(baseUrl, configItem["url"]), {'SERVICE': 'WMS', 'VERSION': '1.3.0', 'REQUEST': 'GetProjectSettings'})
 
@@ -302,7 +307,7 @@ def getTheme(config, configItem, result, resultItem):
         reply = opener(url).read()
         capabilities = parseString(reply)
         capabilities = capabilities.getElementsByTagName("WMS_Capabilities")[0]
-        print("Parsing WMS GetProjectSettings of " + configItem["url"])
+        print(f"Parsing WMS GetProjectSettings of {configItem.get("url")} {"(" + configItem.get("title") + ")" if configItem.get("title") else ""}")
 
         topLayer = getChildElement(getChildElement(capabilities, "Capability"), "Layer")
         wmsName = re.sub(r".*/", "", configItem["url"]).rstrip("?")
@@ -374,8 +379,7 @@ def getTheme(config, configItem, result, resultItem):
                 labels = [composerLabel.getAttribute("name") for composerLabel in composerLabels]
                 if "printLabelBlacklist" in configItem:
                     labels = list(filter(lambda label: label not in configItem["printLabelBlacklist"], labels))
-                .
-                p0rintTemplate['default'] = printTemplate['name'] == configItem.get('defaultPrintLayout')
+                printTemplate['default'] = printTemplate['name'] == configItem.get('defaultPrintLayout')
 
                 if labels:
                     printTemplate["labels"] = labels
@@ -402,7 +406,7 @@ def getTheme(config, configItem, result, resultItem):
 
         # update theme config
         resultItem["url"] = configItem["url"]
-        resultItem["id"] = uniqueThemeId(wmsName)
+        resultItem["id"] = uniqueThemeId(configItem.get("id", wmsName))
         resultItem["name"] = getChildElementValue(topLayer, "Name")
         resultItem["title"] = wmsTitle
         resultItem["description"] = configItem["description"] if "description" in configItem else ""
@@ -478,6 +482,8 @@ def getTheme(config, configItem, result, resultItem):
             resultItem["minSearchScaleDenom"] = configItem["minSearchScale"]
         if "themeInfoLinks" in configItem:
             resultItem["themeInfoLinks"] = configItem["themeInfoLinks"]
+        if "layerTreeHiddenSublayers" in configItem:
+            resultItem["layerTreeHiddenSublayers"] = configItem["layerTreeHiddenSublayers"]
         resultItem["searchProviders"] = configItem["searchProviders"] if "searchProviders" in configItem else []
         if "additionalMouseCrs" in configItem:
             resultItem["additionalMouseCrs"] = configItem["additionalMouseCrs"]
@@ -485,11 +491,13 @@ def getTheme(config, configItem, result, resultItem):
             resultItem["mapCrs"] = configItem["mapCrs"]
         else:
             resultItem["mapCrs"] = result["themes"]["defaultMapCrs"]
+        if "defaultDisplayCrs" in configItem:
+            resultItem["defaultDisplayCrs"] = configItem["defaultDisplayCrs"]
+        else:
+            resultItem["defaultDisplayCrs"] = result["themes"]["defaultDisplayCrs"]
         if printTemplates:
             resultItem["print"] = printTemplates
         resultItem["drawingOrder"] = drawingOrder
-        if "extraDxfParameters" in configItem:
-            resultItem["extraDxfParameters"] = configItem["extraDxfParameters"]
         if "extraPrintParameters" in configItem:
             resultItem["extraPrintParameters"] = configItem["extraPrintParameters"]
         extraLegenParams = configItem["extraLegendParameters"] if "extraLegendParameters" in configItem else ""
@@ -529,6 +537,15 @@ def getTheme(config, configItem, result, resultItem):
 
         if "userMap" in configItem:
             resultItem["userMap"] = configItem["userMap"]
+
+        if "map3d" in configItem:
+            resultItem["map3d"] = configItem["map3d"]
+        if "obliqueDatasets" in configItem:
+            resultItem["obliqueDatasets"] = configItem["obliqueDatasets"]
+        if "viewMode" in configItem:
+            resultItem["viewMode"] = configItem["viewMode"]
+        if "filter" in configItem:
+            resultItem["filter"] = configItem["filter"]
 
         resultItem["editConfig"] = getEditConfig(configItem["editConfig"] if "editConfig" in configItem else None)
 
@@ -575,6 +592,7 @@ def getGroupThemes(config, configGroup, result, resultGroup, groupCounter):
             groupEntry = {
                 "id": "g%d" % groupCounter,
                 "title": group["title"],
+                "titleMsgId": group["titleMsgId"],
                 "items": [],
                 "subdirs": []
             }
@@ -598,7 +616,6 @@ def genThemes(themesConfig):
             config = json.load(fh)
     except:
         return {"error": "Failed to read themesConfig.json"}
-
     result = {
         "themes": {
             "title": "root",
@@ -612,11 +629,14 @@ def genThemes(themesConfig):
             "defaultPrintGrid": config["defaultPrintGrid"] if "defaultPrintGrid" in config else None,
             "defaultSearchProviders": config["defaultSearchProviders"] if "defaultSearchProviders" in config else None,
             "defaultBackgroundLayers": config["defaultBackgroundLayers"] if "defaultBackgroundLayers" in config else [],
+            "defaultMapTips": config["defaultMapTips"] if "defaultMapTips" in config else None,
+            "defaultLabelProfiles": config["defaultLabelProfiles"] if "defaultLabelProfiles" in config else None,
             "pluginData": config["themes"]["pluginData"] if "pluginData" in config["themes"] else [],
             "themeInfoLinks": config["themes"]["themeInfoLinks"] if "themeInfoLinks" in config["themes"] else [],
             "externalLayers": config["themes"]["externalLayers"] if "externalLayers" in config["themes"] else [],
             "backgroundLayers": list(map(reformatAttribution, config["themes"]["backgroundLayers"])),
-            "defaultWMSVersion": config["defaultWMSVersion"] if "defaultWMSVersion" in config else None
+            "defaultWMSVersion": config["defaultWMSVersion"] if "defaultWMSVersion" in config else None,
+            "defaultDisplayCrs": config["defaultDisplayCrs"] if "defaultDisplayCrs" in config else None
             }
     }
     groupCounter = 0

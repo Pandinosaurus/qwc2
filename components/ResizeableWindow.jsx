@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,15 +7,22 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
-import classnames from 'classnames';
+import ReactDOM from 'react-dom';
 import {connect} from 'react-redux';
+import * as portals from 'react-reverse-portal';
 import {Rnd} from 'react-rnd';
-import {v1 as uuidv1} from 'uuid';
+
+import classnames from 'classnames';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import {raiseWindow, registerWindow, unregisterWindow, setSplitScreen} from '../actions/windows';
 import ConfigUtils from '../utils/ConfigUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
 import Icon from './Icon';
+import Spinner from './widgets/Spinner';
+
 import './style/ResizeableWindow.css';
 
 const WINDOW_GEOMETRIES = {};
@@ -24,37 +31,50 @@ class ResizeableWindow extends React.Component {
     static propTypes = {
         baseZIndex: PropTypes.number,
         bottombarHeight: PropTypes.number,
+        busyIcon: PropTypes.bool,
         children: PropTypes.oneOfType([PropTypes.node, PropTypes.func]),
+        colorScheme: PropTypes.string,
+        detachable: PropTypes.bool,
         dockable: PropTypes.oneOfType([PropTypes.bool, PropTypes.string]),
         extraControls: PropTypes.arrayOf(PropTypes.shape({
             active: PropTypes.bool,
             icon: PropTypes.string.isRequired,
             callback: PropTypes.func.isRequired,
-            msgid: PropTypes.string
+            title: PropTypes.string
         })),
+        fitHeight: PropTypes.bool,
+        fullscreen: PropTypes.bool,
+        hideDockIcon: PropTypes.bool,
+        hideTitleBar: PropTypes.bool,
         icon: PropTypes.string,
         initialHeight: PropTypes.number,
         initialWidth: PropTypes.number,
         initialX: PropTypes.number,
         initialY: PropTypes.number,
         initiallyDocked: PropTypes.bool,
+        initiallyMinimized: PropTypes.bool,
+        mapMargins: PropTypes.object,
         maxHeight: PropTypes.number,
         maxWidth: PropTypes.number,
         maximizeable: PropTypes.bool,
+        menuMargins: PropTypes.object,
         minHeight: PropTypes.number,
         minWidth: PropTypes.number,
         minimizeable: PropTypes.bool,
         onClose: PropTypes.func,
+        onExternalWindowResized: PropTypes.func,
         onGeometryChanged: PropTypes.func,
         raiseWindow: PropTypes.func,
         registerWindow: PropTypes.func,
         scrollable: PropTypes.bool,
+        setRef: PropTypes.func,
         setSplitScreen: PropTypes.func,
         splitScreenWhenDocked: PropTypes.bool,
+        splitTopAndBottomBar: PropTypes.bool,
         title: PropTypes.string,
-        titlelabel: PropTypes.string,
         topbarHeight: PropTypes.number,
         unregisterWindow: PropTypes.func,
+        usePortal: PropTypes.bool,
         visible: PropTypes.bool,
         windowStacking: PropTypes.array
     };
@@ -72,158 +92,226 @@ class ResizeableWindow extends React.Component {
         minimizeable: false,
         visible: true,
         dockable: true,
-        onGeometryChanged: () => {}
+        onExternalWindowResized: () => {},
+        onGeometryChanged: () => {},
+        externalWindow: null,
+        usePortal: true
     };
     state = {
-        geometry: null
+        geometry: null,
+        withinMapContainer: false
     };
     constructor(props) {
         super(props);
         this.rnd = null;
         this.dragShield = null;
-        this.titlebar = null;
-        this.id = uuidv1();
-        const canvasHeight = window.innerHeight - this.props.bottombarHeight - this.props.topbarHeight;
-        const width = Math.min(props.initialWidth, window.innerWidth);
-        const height = Math.min(props.initialHeight, canvasHeight);
-        if (WINDOW_GEOMETRIES[props.title || props.titlelabel]) {
-            this.state.geometry = WINDOW_GEOMETRIES[props.title || props.titlelabel];
-        } else {
-            this.state.geometry = {
-                x: props.initialX !== null ? this.computeInitialX(props.initialX) : Math.max(0, Math.round(0.5 * (window.innerWidth - width))),
-                y: props.initialY !== null ? this.computeInitialY(props.initialY) : Math.max(0, Math.round(0.5 * (canvasHeight - height))),
-                width: width,
-                height: height,
-                docked: props.initiallyDocked
-            };
-        }
-        if (props.splitScreenWhenDocked && this.state.geometry.docked) {
-            const dockSide = props.dockable === true ? "left" : props.dockable;
-            const dockSize = ["left", "right"].includes(dockSide) ? this.state.geometry.width : this.state.geometry.height;
-            props.setSplitScreen(this.id, dockSide, dockSize);
+        this.id = uuidv4();
+        this.portalNode = props.usePortal ? portals.createHtmlPortalNode() : null;
+        if (this.portalNode) {
+            this.portalNode.element.addEventListener('click', this.raiseWindow);
+            this.portalNode.element.addEventListener('focus', this.raiseWindow);
+            this.portalNode.element.addEventListener('focusin', this.raiseWindow);
         }
     }
-    computeInitialX = (x) => {
-        return x > 0 || Object.is(x, 0) ? x : window.innerWidth - this.props.initialWidth - Math.abs(x);
-    };
-    computeInitialY = (y) => {
-        const canvasHeight = window.innerHeight - this.props.bottombarHeight - this.props.topbarHeight;
-        return y > 0 || Object.is(y, 0) ? y : canvasHeight - this.props.initialHeight - Math.abs(y);
-    };
     componentDidMount() {
         this.props.registerWindow(this.id);
-        this.props.onGeometryChanged(this.state.geometry);
+        window.addEventListener('beforeunload', this.closeExternalWindow, {once: true});
     }
     componentWillUnmount() {
         this.props.unregisterWindow(this.id);
         if (this.props.splitScreenWhenDocked) {
-            this.props.setSplitScreen(this.id, null);
+            this.props.setSplitScreen(this.id, null, null, false);
         }
+        if (this.state.externalWindow) {
+            this.state.externalWindow.close();
+        }
+        window.removeEventListener('beforeunload', this.closeExternalWindow);
     }
     componentDidUpdate(prevProps, prevState) {
+        if (!this.state.geometry || !prevState.geometry) {
+            return;
+        }
         if (this.rnd && this.props.visible && this.props.visible !== prevProps.visible) {
             this.props.onGeometryChanged(this.state.geometry);
             this.rnd.updatePosition(this.state.geometry);
+            // Set focus to first focusable element
+            this.rnd.resizableElement?.current?.querySelector?.('[tabindex="0"]')?.focus?.();
         }
         if (this.state.geometry !== prevState.geometry) {
-            WINDOW_GEOMETRIES[this.props.title || this.props.titlelabel] = this.state.geometry;
+            this.props.onGeometryChanged(this.state.geometry);
+            WINDOW_GEOMETRIES[this.props.title] = this.state.geometry;
+        }
+        if (this.props.colorScheme !== prevProps.colorScheme && this.state.externalWindow) {
+            const externalWindowRoot = this.state.externalWindow.document.querySelector(':root');
+            externalWindowRoot.classList.remove(prevProps.colorScheme);
+            externalWindowRoot.classList.add(this.props.colorScheme);
         }
         if (this.props.splitScreenWhenDocked && (
-            this.props.visible !== prevProps.visible || this.state.geometry !== prevState.geometry
+            this.props.visible !== prevProps.visible ||
+            this.state.geometry !== prevState.geometry ||
+            this.state.externalWindow !== prevState.externalWindow
         )) {
             if (
                 (!this.props.visible && prevProps.visible) ||
-                (this.state.geometry.docked === false && prevState.geometry.docked !== false)
+                (this.state.geometry.docked === false && prevState.geometry.docked !== false) ||
+                (this.state.geometry.maximized === true && prevState.geometry.maximized !== true) ||
+                (this.state.externalWindow && !prevState.externalWindow)
             ) {
-                this.props.setSplitScreen(this.id, null);
-            } else if (this.props.visible && this.state.geometry.docked) {
+                this.props.setSplitScreen(this.id, null, null, false);
+            } else if (this.props.visible && this.state.geometry.docked && !this.state.externalWindow && !this.state.geometry.maximized) {
                 const dockSide = this.props.dockable === true ? "left" : this.props.dockable;
                 const dockSize = ["left", "right"].includes(dockSide) ? this.state.geometry.width : this.state.geometry.height;
-                this.props.setSplitScreen(this.id, dockSide, dockSize);
+                this.props.setSplitScreen(this.id, dockSide, dockSize, this.props.splitTopAndBottomBar);
             }
         }
+        if (!this.props.visible && prevProps.visible && this.state.externalWindow) {
+            // Cannot hide an external window
+            this.moveToInternalWindow();
+        }
     }
-    renderRole = (role) => {
-        return React.Children.toArray(this.props.children).filter((child) => child.props.role === role);
+    updateSize = (size) => {
+        this.rnd.updateSize(size);
+        this.setState(state => ({
+            geometry: {...state.geometry, ...size}
+        }));
+    };
+    updatePosition = (position) => {
+        this.rnd.updatePosition(position);
+        this.setState(state => ({
+            geometry: {...state.geometry, ...position}
+        }));
     };
     onClose = (ev) => {
+        if (this.state.externalWindow) {
+            this.state.externalWindow.removeEventListener('beforeunload', this.props.onClose);
+        }
         this.props.onClose();
         ev.stopPropagation();
     };
-    render() {
-        let dockable = this.props.dockable;
+    renderTitleBar = () => {
+        if (this.props.fullscreen || this.props.hideTitleBar) {
+            return null;
+        }
+        const maximized = this.state.geometry.maximized ? true : false;
+        const minimized = this.state.geometry.minimized ? true : false;
+        const docked = this.state.geometry.docked;
+        const dockSide = this.props.dockable === true ? "left" : this.props.dockable;
+        let dockable = this.props.dockable && !this.state.externalWindow;
         if (ConfigUtils.getConfigProp("globallyDisableDockableDialogs")) {
             dockable = false;
         }
-        let maximizeable = this.props.maximizeable;
+        let maximizeable = this.props.maximizeable && !this.state.externalWindow && !this.props.fitHeight;
         if (ConfigUtils.getConfigProp("globallyDisableMaximizeableDialogs")) {
             maximizeable = false;
         }
+        const minimizeable = this.props.minimizeable && !this.state.externalWindow;
+
         let icon = null;
-        if (this.props.icon) {
+        if (this.props.busyIcon) {
+            icon = (<Spinner />);
+        } else if (this.props.icon) {
             icon = (<Icon className="resizeable-window-titlebar-icon" icon={this.props.icon} size="large" />);
         }
-        const bodyclasses = classnames({
-            "resizeable-window-body": true,
-            "resizeable-window-nodrag": true,
-            "resizeable-window-body-scrollable": this.props.scrollable,
-            "resizeable-window-body-nonscrollable": !this.props.scrollable
-        });
-        const style = {display: this.props.visible ? 'initial' : 'none'};
-        const maximized = this.state.geometry.maximized ? true : false;
-        const minimized = this.state.geometry.minimized ? true : false;
-        const zIndex = this.props.baseZIndex + this.props.windowStacking.findIndex(item => item === this.id);
-        const docked = this.state.geometry.docked;
-        const dockSide = this.props.dockable === true ? "left" : this.props.dockable;
+
         let dockIcon = docked ? 'undock' : 'dock';
         dockIcon = dockIcon + "_" + dockSide;
 
-        const content = [
-            (<div className="resizeable-window-titlebar" key="titlebar" onDoubleClick={this.toggleMaximize} ref={el => { this.titlebar = el; }}>
+        const iconClasses = classnames({
+            "resizeable-window-titlebar-control": true,
+            "resizeable-window-nodrag": true
+        });
+
+        let detachIcons = null;
+        if (!ConfigUtils.isMobile() && !ConfigUtils.getConfigProp("globallyDisableDetachableDialogs") && this.props.detachable !== false) {
+            detachIcons = this.state.externalWindow ? (
+                <Icon className={iconClasses} icon="embed" onClick={this.moveToInternalWindow} title={LocaleUtils.tr("window.embed")} />
+            ) : (
+                <Icon className={iconClasses} icon="detach" onClick={this.moveToExternalWindow} title={LocaleUtils.tr("window.detach")} />
+            );
+        }
+        return (
+            <div className="resizeable-window-titlebar" onDoubleClick={this.state.externalWindow ? null : this.toggleMaximize}>
                 {icon}
                 <span className="resizeable-window-titlebar-title">
-                    {this.props.title ? LocaleUtils.tr(this.props.title) : (this.props.titlelabel || "")}
+                    {this.props.title}
                 </span>
-                <span className="resizeable-window-titlebar-extra-controls">
-                    {(this.props.extraControls || []).map(entry => {
-                        const iconClasses = classnames({
-                            "resizeable-window-nodrag": true,
-                            "resizeable-window-titlebar-extra-control": true,
-                            "resizeable-window-titlebar-extra-control-active": entry.active
-                        });
-                        return (
-                            <Icon
-                                className={iconClasses} icon={entry.icon} key={entry.icon}
-                                onClick={entry.callback} titlemsgid={entry.msgid ? LocaleUtils.trmsg(entry.msgid) : ""} />
-                        );
-                    })}
-                </span>
-                {!maximized && dockable ? (
+                {(this.props.extraControls || []).map(entry => {
+                    const extraIconClasses = classnames({
+                        "resizeable-window-titlebar-extra-control": true,
+                        "resizeable-window-titlebar-extra-control-active": entry.active,
+                        "resizeable-window-nodrag": true
+                    });
+                    return (
+                        <Icon
+                            className={extraIconClasses} icon={entry.icon} key={entry.icon}
+                            onClick={entry.callback} title={entry.title} />
+                    );
+                })}
+                {!maximized && dockable && !this.props.hideDockIcon ? (
                     <Icon
-                        className="resizeable-window-nodrag resizeable-window-titlebar-control" icon={dockIcon}
+                        className={iconClasses} icon={dockIcon}
                         onClick={this.toggleDock}
-                        titlemsgid={this.state.geometry.docked ? LocaleUtils.trmsg("window.undock") : LocaleUtils.trmsg("window.dock")} />
+                        title={this.state.geometry.docked ? LocaleUtils.tr("window.undock") : LocaleUtils.tr("window.dock")} />
                 ) : null}
-                {this.props.minimizeable ? (<Icon className="resizeable-window-nodrag resizeable-window-titlebar-control" icon={minimized ? "unminimize" : "minimize"} onClick={this.toggleMinimize} titlemsgid={minimized ? LocaleUtils.trmsg("window.unminimize") : LocaleUtils.trmsg("window.minimize")} />) : null}
-                {maximizeable ? (<Icon className="resizeable-window-nodrag resizeable-window-titlebar-control" icon={maximized ? "unmaximize" : "maximize"} onClick={this.toggleMaximize} titlemsgid={maximized ? LocaleUtils.trmsg("window.unmaximize") : LocaleUtils.trmsg("window.maximize")} />) : null}
-                {this.props.onClose ? (<Icon className="resizeable-window-nodrag resizeable-window-titlebar-control" icon="remove" onClick={this.onClose} titlemsgid={LocaleUtils.trmsg("window.close")} />) : null}
-            </div>),
-            (<div className={bodyclasses} key="body" onMouseDown={() => this.props.raiseWindow(this.id)}>
-                <div className="resizeable-window-drag-shield" ref={el => {this.dragShield = el;}} />
-                {this.renderRole("body")}
-            </div>)
-        ];
+                {minimizeable ? (
+                    <Icon className={iconClasses} icon={minimized ? "unminimize" : "minimize"} onClick={this.toggleMinimize} title={minimized ? LocaleUtils.tr("window.unminimize") : LocaleUtils.tr("window.minimize")} />
+                ) : null}
+                {maximizeable ? (
+                    <Icon className={iconClasses} icon={maximized ? "unmaximize" : "maximize"} onClick={this.toggleMaximize} title={maximized ? LocaleUtils.tr("window.unmaximize") : LocaleUtils.tr("window.maximize")} />
+                ) : null}
+                {detachIcons}
+                {this.props.onClose ? (
+                    <Icon className={iconClasses} icon="remove" onClick={this.onClose} title={LocaleUtils.tr("common.close")} />
+                ) : null}
+            </div>
+        );
+    };
+    renderInternalWindowContainer = () => {
+        const docked = this.state.geometry?.docked ?? this.props.initiallyDocked;
+        const maximized = this.state.geometry?.maximized ?? false;
+        const splitTopAndBottomBar = this.props.splitTopAndBottomBar && this.props.splitScreenWhenDocked && (docked || maximized);
+        let marginLeft = 0;
+        let marginRight = 0;
+        if (!splitTopAndBottomBar && !this.state.withinMapContainer) {
+            marginLeft = this.props.mapMargins.outerLeft + this.props.menuMargins.left;
+            marginRight = this.props.mapMargins.outerRight + this.props.menuMargins.right;
+        }
+        const containerStyle = {
+            left: marginLeft + 'px',
+            right: marginRight + 'px',
+            top: splitTopAndBottomBar ? 0 : this.props.topbarHeight + 'px',
+            bottom: splitTopAndBottomBar ? 0 : this.props.bottombarHeight + 'px',
+            zIndex: splitTopAndBottomBar ? 110 : this.props.baseZIndex + this.props.windowStacking.findIndex(item => item === this.id)
+        };
+        return (
+            <div className="resizeable-window-container" key="InternalWindow" ref={this.setInitialSize} style={containerStyle}>
+                {this.props.visible && this.state.geometry ? this.renderInternalWindow() : null}
+            </div>
+        );
+    };
+    renderInternalWindow = () => {
+        const maximized = (this.state.geometry.maximized || this.props.fullscreen) ? true : false;
+        const minimized = this.state.geometry.minimized ? true : false;
+        const dockSide = this.props.dockable === true ? "left" : this.props.dockable;
+
+        const bodyclasses = classnames({
+            "resizeable-window-body": true,
+            "resizeable-window-body-scrollable": this.props.scrollable,
+            "resizeable-window-body-nonscrollable": !this.props.scrollable,
+            "resizeable-window-nodrag": true
+        });
 
         const windowclasses = classnames({
             "resizeable-window": true,
-            "resizeable-window-maximized": this.state.geometry.maximized,
-            "resizeable-window-minimized": this.state.geometry.minimized,
-            "resizeable-window-docked-left": !this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "left" && !this.state.geometry.maximized,
-            "resizeable-window-docked-right": !this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "right" && !this.state.geometry.maximized,
-            "resizeable-window-split-left": this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "left" && !this.state.geometry.maximized,
-            "resizeable-window-split-right": this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "right" && !this.state.geometry.maximized,
-            "resizeable-window-docked-top": this.state.geometry.docked && dockSide === "top" && !this.state.geometry.maximized,
-            "resizeable-window-docked-bottom": this.state.geometry.docked && dockSide === "bottom" && !this.state.geometry.maximized
+            "resizeable-window-maximized": maximized,
+            "resizeable-window-minimized": minimized,
+            "resizeable-window-fit-height": this.props.fitHeight,
+            "resizeable-window-docked-left": !this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "left" && !maximized,
+            "resizeable-window-docked-right": !this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "right" && !maximized,
+            "resizeable-window-split-left": this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "left" && !maximized,
+            "resizeable-window-split-right": this.props.splitScreenWhenDocked && this.state.geometry.docked && dockSide === "right" && !maximized,
+            "resizeable-window-docked-top": this.state.geometry.docked && dockSide === "top" && !maximized,
+            "resizeable-window-docked-bottom": this.state.geometry.docked && dockSide === "bottom" && !maximized
         });
         let resizeMode = {
             left: true,
@@ -235,7 +323,7 @@ class ResizeableWindow extends React.Component {
             topLeft: true,
             topRight: true
         };
-        if (this.state.geometry.maximized || this.state.geometry.minimized) {
+        if (maximized || minimized) {
             resizeMode = false;
         } else if (this.state.geometry.docked) {
             resizeMode = {
@@ -245,28 +333,121 @@ class ResizeableWindow extends React.Component {
                 bottom: (dockSide !== "bottom" && !this.props.splitScreenWhenDocked) || (this.props.splitScreenWhenDocked && dockSide === "top")
             };
         }
+        if (this.props.fitHeight) {
+            resizeMode.top = false;
+            resizeMode.bottom = false;
+            resizeMode.bottomLeft = true;
+            resizeMode.bottomRight = true;
+            resizeMode.topLeft = true;
+            resizeMode.topRight = true;
+        }
         return (
-            <div className="resizeable-window-container" style={style}>
-                <Rnd bounds="parent" cancel=".resizeable-window-nodrag"
-                    className={windowclasses} default={this.state.geometry}
-                    disableDragging={this.state.geometry.maximized || this.state.geometry.docked}
-                    enableResizing={resizeMode}
-                    maxHeight={this.props.maxHeight || window.innerHeight} maxWidth={this.props.maxWidth || window.innerWidth}
-                    minHeight={this.props.minHeight} minWidth={this.props.minWidth}
-                    onDragStart={this.onDragStart}
-                    onDragStop={this.onDragStop}
-                    onMouseDown={() => this.props.raiseWindow(this.id)}
-                    onResizeStop={this.onResizeStop}
-                    ref={this.initRnd} style={{zIndex: zIndex}}>
-                    {content}
-                </Rnd>
-            </div>
+            <Rnd bounds="parent" cancel=".resizeable-window-nodrag"
+                className={windowclasses} default={this.state.geometry}
+                disableDragging={maximized || this.state.geometry.docked} enableResizing={resizeMode}
+                maxHeight={this.props.maxHeight || "100%"} maxWidth={this.props.maxWidth || "100%"}
+                minHeight={this.props.minHeight} minWidth={this.props.minWidth}
+                onDragStart={this.onDragStart}
+                onDragStop={this.onDragStop}
+                onMouseDown={this.raiseWindow}
+                onResizeStop={this.onResizeStop}
+                ref={this.initRnd}
+            >
+                <div className="resizeable-window-contents" onFocus={this.raiseWindow}>
+                    {this.renderTitleBar()}
+                    <div className={bodyclasses} onMouseDown={this.raiseWindow} onScroll={this.preventScroll}>
+                        <div className="resizeable-window-drag-shield" ref={el => {this.dragShield = el;}} />
+                        {this.portalNode ? (
+                            <div className="resizeable-window-portal-container">
+                                <portals.OutPortal node={this.portalNode} />
+                            </div>
+                        ) : this.props.children}
+                    </div>
+                </div>
+            </Rnd>
         );
+    };
+    preventScroll = (ev) => {
+        if (!this.props.scrollable) {
+            ev.target.scrollLeft = 0;
+            ev.target.scrollTop = 0;
+        }
+    };
+    raiseWindow = () => {
+        if (this.props.windowStacking[this.props.windowStacking.length - 1] !== this.id) {
+            this.props.raiseWindow(this.id);
+        }
+    };
+    setInitialSize = (container) => {
+        if (!container) {
+            return;
+        }
+        const withinMapContainer = !!container.closest('.map-container');
+        const width = Math.min(this.props.initialWidth, container.offsetWidth);
+        const height = Math.min(this.props.initialHeight, container.offsetHeight);
+        let geometry = null;
+        if (WINDOW_GEOMETRIES[this.props.title]) {
+            geometry = WINDOW_GEOMETRIES[this.props.title];
+        } else {
+            geometry = {
+                x: this.props.initialX !== null ? this.computeInitialX(container, this.props.initialX) : Math.max(0, Math.round(0.5 * (container.offsetWidth - width))),
+                y: this.props.initialY !== null ? this.computeInitialY(container, this.props.initialY) : Math.max(0, Math.round(0.5 * (container.offsetHeight - height))),
+                width: width,
+                height: height,
+                docked: this.props.initiallyDocked,
+                detached: false,
+                minimized: this.props.initiallyMinimized || false
+            };
+        }
+        if (this.props.splitScreenWhenDocked && geometry.docked) {
+            const dockSide = this.props.dockable === true ? "left" : this.props.dockable;
+            const dockSize = ["left", "right"].includes(dockSide) ? geometry.width : geometry.height;
+            this.props.setSplitScreen(this.id, dockSide, dockSize, this.props.splitTopAndBottomBar);
+        }
+        this.setState({geometry: geometry, withinMapContainer: withinMapContainer});
+    };
+    computeInitialX = (container, x) => {
+        return x > 0 || Object.is(x, 0) ? x : container.offsetWidth - this.props.initialWidth - Math.abs(x);
+    };
+    computeInitialY = (container, y) => {
+        return y > 0 || Object.is(y, 0) ? y : container.offsetHeight - this.props.initialHeight - Math.abs(y);
+    };
+    renderExternalWindow = () => {
+        return ReactDOM.createPortal((
+            <div className="resizeable-window-contents">
+                {this.renderTitleBar()}
+                <div className="resizeable-window-body">
+                    {this.portalNode ? (
+                        <div className="resizeable-window-portal-container">
+                            <portals.OutPortal node={this.portalNode} />
+                        </div>
+                    ) : this.props.children}
+                </div>
+            </div>
+        ), this.state.externalWindow.document.body);
+    };
+    render() {
+        return [this.portalNode ? (
+            <portals.InPortal key="InPortal" node={this.portalNode}>
+                {this.props.children}
+            </portals.InPortal>
+        ) : null, this.state.externalWindow ? (
+            this.renderExternalWindow()
+        ) : (
+            this.renderInternalWindowContainer()
+        )];
     }
     initRnd = (el) => {
         if (el) {
             this.rnd = el;
             this.rnd.updatePosition(this.state.geometry);
+            // Set focus to first focusable element
+            if (this.props.visible) {
+                this.rnd.resizableElement?.current?.querySelector?.('[tabindex="0"]')?.focus?.();
+            }
+            this.props.setRef?.(this);
+        } else {
+            this.props.setRef?.(null);
         }
     };
     onDragStart = () => {
@@ -322,12 +503,107 @@ class ResizeableWindow extends React.Component {
             }
         }));
     };
+    moveToExternalWindow = () => {
+        const title = this.props.title;
+        const windowOptions = [
+            "popup=true",
+            "toolbar=no",
+            "locationbar=no",
+            "location=no",
+            "directories=no",
+            "status=no",
+            "menubar=no",
+            "scrollbars=yes",
+            "resizable=yes",
+            "width=" + this.state.geometry.width,
+            "height=" + this.state.geometry.height
+        ].join(", ");
+        const externalWindow = window.open('about:blank', "_blank", windowOptions);
+        externalWindow.addEventListener('resize', this.props.onExternalWindowResized, false);
+        const loadInterval = setInterval(() => {
+            if (externalWindow.document.readyState !== 'complete') {
+                return;
+            }
+            clearInterval(loadInterval);
+            externalWindow.addEventListener('beforeunload', this.props.onClose, {capture: false, once: true});
+            const titleEl = externalWindow.document.createElement('title');
+            titleEl.appendChild(externalWindow.document.createTextNode(title));
+            externalWindow.document.head.appendChild(titleEl);
+
+            const icon = MiscUtils.getFaviconFromIcon(this.props.icon, 48);
+            if (icon) {
+                const iconEl = externalWindow.document.createElement('link');
+                iconEl.rel = "icon";
+                iconEl.href = icon;
+                iconEl.sizes = "48x48";
+                externalWindow.document.head.appendChild(iconEl);
+            }
+
+            // Inherit styles
+            Array.from(document.styleSheets).forEach(styleSheet => {
+                if (styleSheet.href) {
+                    // External styles
+                    const linkElement = externalWindow.document.createElement('link');
+                    linkElement.rel = 'stylesheet';
+                    linkElement.href = styleSheet.href;
+                    externalWindow.document.head.appendChild(linkElement);
+                } else if (styleSheet.cssRules) {
+                    // Inline styles
+                    const styleElement = externalWindow.document.createElement('style');
+                    const cssText = Array.from(styleSheet.cssRules).map(rule => rule.cssText).join("\n");
+                    styleElement.appendChild(externalWindow.document.createTextNode(cssText));
+                    externalWindow.document.head.appendChild(styleElement);
+                }
+            });
+            externalWindow.document.querySelector(':root').style.setProperty('--topbar-height',
+                document.querySelector(':root').style.getPropertyValue('--topbar-height')
+            );
+            externalWindow.document.querySelector(':root').style.setProperty('--bottombar-height',
+                document.querySelector(':root').style.getPropertyValue('--bottombar-height')
+            );
+            if (this.props.colorScheme) {
+                externalWindow.document.querySelector(':root').classList.add(this.props.colorScheme);
+            }
+            // The application styles are scoped below the application root
+            externalWindow.document.body.classList.add('qwc-root');
+            // Inherit API
+            externalWindow.qwc2 = window.qwc2;
+
+            this.setState(state => ({
+                externalWindow: externalWindow,
+                geometry: {...state.geometry, detached: true}
+            }));
+        }, 50);
+    };
+    moveToInternalWindow = () => {
+        if (this.state.externalWindow) {
+            this.state.externalWindow.removeEventListener('beforeunload', this.props.onClose);
+            this.state.externalWindow.removeEventListener('resize', this.props.onExternalWindowResized, false);
+            this.state.externalWindow.close();
+            this.setState(state => {
+                const newGeometry = {...state.geometry, detached: false};
+                WINDOW_GEOMETRIES[this.props.title] = newGeometry;
+                return {
+                    externalWindow: null,
+                    geometry: newGeometry
+                };
+            });
+        }
+    };
+    closeExternalWindow = () => {
+        if (this.state.externalWindow) {
+            this.state.externalWindow.close();
+        }
+    };
 }
 
 export default connect((state) => ({
+    colorScheme: state.localConfig.colorScheme,
     windowStacking: state.windows.stacking,
-    topbarHeight: state.map.topbarHeight,
-    bottombarHeight: state.map.bottombarHeight
+    topbarHeight: state.windows.topbarHeight,
+    bottombarHeight: state.windows.bottombarHeight,
+    mapMargins: state.windows.mapMargins,
+    menuMargins: state.windows.menuMargins
 }), {
     raiseWindow: raiseWindow,
     registerWindow: registerWindow,

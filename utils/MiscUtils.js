@@ -1,14 +1,29 @@
 /**
- * Copyright 2018-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
+import DOMPurify from 'dompurify';
+
 import ConfigUtils from './ConfigUtils';
 
 const MiscUtils = {
+    /**
+     * The application container the specified element lives in, or the document body as fallback
+     */
+    appContainer(el) {
+        return el?.closest?.('.plugins-container') ?? el?.ownerDocument?.body ?? document.body;
+    },
+    loginUrl(clearLayerParam = false) {
+        const target = new URL(window.location.href);
+        if (clearLayerParam) {
+            target.searchParams.delete('l');
+        }
+        return ConfigUtils.getConfigProp("authServiceUrl") + "login?url=" + encodeURIComponent(target.href);
+    },
     addLinkAnchors(text) {
         // If text already contains tags, do nothing
         const tagRegEx = /(<.[^(><.)]+>)/;
@@ -21,6 +36,7 @@ const MiscUtils = {
                 null,
                 // Original String: (\s|^)((http(s)?|(s)?ftp):\/\/.)?(www\.)?[-a-zA-Z0-9@:%._+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_+.~#?&//=\u00C0-\u00FF\u0370-\u03FF]*)
                 // Escaped with https://www.freeformatter.com/json-escape.html
+                // eslint-disable-next-line
                 "(\\s|^)((http(s)?|(s)?ftp):\\\/\\\/.)?(www\\.)?[-a-zA-Z0-9@:%._+~#=]{2,256}\\.[a-z]{2,6}\\b([-a-zA-Z0-9@:%_+.~#?&\/\/=\\u00C0-\\u00FF\\u0370-\\u03FF]*)"
             ),
             "g"
@@ -50,6 +66,12 @@ const MiscUtils = {
         urlRegEx.lastIndex = 0;
         return value;
     },
+    sanitizeHtml(text) {
+        return DOMPurify.sanitize(text, {
+            ADD_ATTR: ['target'], ADD_TAGS: ["iframe"], FORCE_BODY: true,
+            ALLOW_UNKNOWN_PROTOCOLS: true
+        });
+    },
     htmlEncode(text) {
         return text
             .replace(/&/g, "&amp;")
@@ -71,7 +93,38 @@ const MiscUtils = {
     killEvent(ev) {
         if (ev.cancelable) {
             ev.stopPropagation();
+            ev.nativeEvent?.stopImmediatePropagation?.();
             ev.preventDefault();
+        }
+    },
+    checkKeyActivate(ev, onEsc = null, spaceActivate = true) {
+        if ((spaceActivate && ev.code === "Space") || ev.code === "Enter") {
+            MiscUtils.killEvent(ev);
+            ev.currentTarget.click();
+        } else if (ev.code === "Escape" && onEsc) {
+            MiscUtils.killEvent(ev);
+            onEsc();
+        }
+    },
+    checkKeyActivatePointerDown(ev) {
+        if (ev.code === "Space" || ev.code === "Enter") {
+            MiscUtils.killEvent(ev);
+            ev.currentTarget.dispatchEvent(new PointerEvent("pointerdown", {
+                bubbles: true,
+                cancelable: true,
+                pointerId: 1,
+                pointerType: "mouse",
+                view: ev.view
+            }));
+            ev.currentTarget.addEventListener("keyup", (ev2) => {
+                ev2.currentTarget.dispatchEvent(new PointerEvent("pointerup", {
+                    bubbles: true,
+                    cancelable: true,
+                    pointerId: 1,
+                    pointerType: "mouse",
+                    view: ev2.view
+                }));
+            }, {once: true});
         }
     },
     blendColors(color1, color2, ratio) {
@@ -85,6 +138,33 @@ const MiscUtils = {
         const toHex = (num) => ("0" + Math.round(num).toString(16)).slice(-2);
         return '#' + toHex(color3[0]) + toHex(color3[1]) + toHex(color3[2]);
     },
+    hslToRgb(h, s, l) {
+        // Takes h, s, l in [0, 1] range and returns [r, g, b] in [0, 1] range
+        const c = (1 - Math.abs(2 * l - 1)) * s;
+        const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+        const m = l - c / 2;
+        h *= 360;
+
+        let r = 0;
+        let g = 0;
+        let b = 0;
+
+        if (h >= 0 && h < 60) {
+            r = c; g = x; b = 0;
+        } else if (h >= 60 && h < 120) {
+            r = x; g = c; b = 0;
+        } else if (h >= 120 && h < 180) {
+            r = 0; g = c; b = x;
+        } else if (h >= 180 && h < 240) {
+            r = 0; g = x; b = c;
+        } else if (h >= 240 && h < 300) {
+            r = x; g = 0; b = c;
+        } else if (h >= 300 && h < 360) {
+            r = c; g = 0; b = x;
+        }
+
+        return [r + m, g + m, b + m];
+    },
     ensureArray(el) {
         if (el === undefined) {
             return [];
@@ -93,14 +173,29 @@ const MiscUtils = {
         }
         return [el];
     },
-    capitalizeFirst(text) {
-        return text.slice(0, 1).toUpperCase() + text.slice(1).toLowerCase();
+    objectOmit(obj, excludeKeys) {
+        return Object.fromEntries(
+            Object.entries(obj).filter(([key]) => !excludeKeys.includes(key))
+        );
     },
-    isBrightColor(hex) {
-        const color = +("0x" + hex.slice(1).replace(hex.length < 5 && /./g, '$&$&'));
-        const r = color >> 16;
-        const g = color >> 8 & 255;
-        const b = color & 255;
+    capitalizeFirst(text) {
+        return text.slice(0, 1).toUpperCase() + text.slice(1);
+    },
+    isNumeric(value) {
+        return typeof value === 'string' && value.trim() !== '' && String(Number(value)) === value.trim();
+    },
+    isBrightColor(color) {
+        let r;
+        let g;
+        let b;
+        if (Array.isArray(color)) {
+            [r, g, b] = color;
+        } else {
+            const intcolor = +("0x" + color.slice(1).replace(color.length < 5 && /./g, '$&$&'));
+            r = intcolor >> 16;
+            g = intcolor >> 8 & 255;
+            b = intcolor & 255;
+        }
 
         const hsp = Math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b));
         return hsp > 127.5;
@@ -110,7 +205,147 @@ const MiscUtils = {
             return 'https:' + url.substr(5);
         }
         return url;
+    },
+    convertEmToPx(emsize) {
+        const defaultfontsize = getComputedStyle(document.documentElement).fontSize;
+        return emsize * parseFloat(defaultfontsize);
+    },
+    getFaviconFromIcon(icon, size) {
+        let glyph = null;
+        for (const sheet of document.styleSheets) {
+            try {
+                for (const rule of sheet.cssRules) {
+                    if (rule.selectorText === `.icon-${icon}::before`) {
+                        glyph = rule.style.content.replace(/["']/g, '');
+                        break;
+                    }
+                }
+            } catch {
+                continue;
+            }
+        }
+        if (glyph === null) {
+            return null;
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+
+        const ctx = canvas.getContext('2d');
+        ctx.font = `${size - 5}px qwc2-icons`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#FFF'; // You can change this color if needed
+        ctx.fillText(glyph, size / 2, size / 2);
+
+        return canvas.toDataURL('image/png');
+    },
+    resolveAssetsPath(path) {
+        return path && path.startsWith(":/") ? ConfigUtils.getAssetsPath() + path.substr(1) : path;
+    },
+    formatDate(input, pattern, locale = undefined) {
+        // Try to parse the input as a full date-time or as time-only
+        let date;
+        if (/^\d{2}:\d{2}(:\d{2})?$/.test(input)) {
+            const now = new Date();
+            const [h, m, s] = input.split(':').map(Number);
+            date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s || 0);
+        } else {
+            date = new Date(input);
+        }
+
+        if (isNaN(date)) throw new Error("Invalid date");
+
+        const pad = (n, len = 2) => String(n).padStart(len, "0");
+
+        const tokens = {
+            yyyy: date.getFullYear(),
+            yy: String(date.getFullYear()).slice(-2),
+            MMMM: date.toLocaleString(locale, { month: "long" }),
+            MMM: date.toLocaleString(locale, { month: "short" }),
+            MM: pad(date.getMonth() + 1),
+            M: date.getMonth() + 1,
+            dd: pad(date.getDate()),
+            d: date.getDate(),
+            dddd: date.toLocaleString(locale, { weekday: "long" }),
+            ddd: date.toLocaleString(locale, { weekday: "short" }),
+            hh: pad(((date.getHours() + 11) % 12) + 1),
+            h: ((date.getHours() + 11) % 12) + 1,
+            HH: pad(date.getHours()),
+            H: date.getHours(),
+            mm: pad(date.getMinutes()),
+            m: date.getMinutes(),
+            ss: pad(date.getSeconds()),
+            s: date.getSeconds(),
+            AP: date.getHours() < 12 ? "AM" : "PM",
+            ap: date.getHours() < 12 ? "am" : "pm"
+        };
+
+        return pattern.replace(
+            /(yyyy|yy|MMMM|MMM|MM|M|dddd|ddd|dd|d|hh|h|HH|H|mm|m|ss|s|AP|ap)/g,
+            match => tokens[match]
+        );
+    },
+    measureText(text, font) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.font = font;
+        const metrics = ctx.measureText(text);
+        return {
+            width: metrics.width,
+            height: metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent
+        };
     }
 };
+
+export class ToggleSet {
+    constructor(set = new Set()) {
+        this._set = set;
+    }
+    has = (key) => {
+        return this._set.has(key);
+    };
+    toggle = (key) => {
+        const newset = new Set(this._set);
+        if (newset.has(key)) {
+            newset.delete(key);
+        } else {
+            newset.add(key);
+        }
+        return new ToggleSet(newset);
+    };
+    delete = (key) => {
+        if (this._set.has(key)) {
+            const newset = new Set(this._set);
+            newset.delete(key);
+            return new ToggleSet(newset);
+        } else {
+            return this;
+        }
+    };
+    filtered = (test) => {
+        const newset = new Set([...this._set].filter(test));
+        return new ToggleSet(newset);
+    };
+    add = (key) => {
+        if (!this._set.has(key)) {
+            const newset = new Set(this._set);
+            newset.add(key);
+            return new ToggleSet(newset);
+        } else {
+            return this;
+        }
+    };
+    isEmpty = () => {
+        return this._set.size === 0;
+    };
+    size = () => {
+        return this._set.size;
+    };
+    entries = () => {
+        return [...this._set];
+    };
+}
 
 export default MiscUtils;

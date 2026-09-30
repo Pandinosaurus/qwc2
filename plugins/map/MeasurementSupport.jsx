@@ -1,6 +1,6 @@
 /**
  * Copyright 2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,126 +9,241 @@
 
 import React from 'react';
 import {connect} from 'react-redux';
-import PropTypes from 'prop-types';
-import {createSelector} from 'reselect';
+
+import Mousetrap from 'mousetrap';
 import ol from 'openlayers';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
+import {addLayerFeatures, removeLayer} from '../../actions/layers';
 import {changeMeasurementState} from '../../actions/measurement';
-import displayCrsSelector from '../../selectors/displaycrs';
+import FeatureStyles, {computeMeasureFeatureStyle} from '../../utils/FeatureStyles';
+import MapUtils from '../../utils/MapUtils';
 import MeasureUtils from '../../utils/MeasureUtils';
-import FeatureStyles from '../../utils/FeatureStyles';
+import DrawInteraction from './DrawInteraction';
 
-
+/**
+ * Measurement support for the map component.
+ */
 class MeasurementSupport extends React.Component {
     static propTypes = {
+        addLayerFeatures: PropTypes.func,
         changeMeasurementState: PropTypes.func,
         displayCrs: PropTypes.string,
         map: PropTypes.object,
-        mapCrs: PropTypes.string,
         measurement: PropTypes.object,
-        // See defaultOpts below
-        options: PropTypes.object,
-        projection: PropTypes.string
-    };
-    static defaultOpts = {
-        geodesic: true
+        projection: PropTypes.string,
+        removeLayer: PropTypes.func,
+        theme: PropTypes.object
     };
     constructor(props) {
         super(props);
         this.pickPositionCallbackTimeout = null;
         this.measureLayer = null;
+        this.currentFeature = null;
+        this.interactions = [];
     }
     componentDidUpdate(prevProps) {
-        if (this.props.measurement.geomType && this.props.measurement.geomType !== prevProps.measurement.geomType ) {
-            this.addDrawInteraction(this.props);
-        } else if (!this.props.measurement.geomType) {
-            this.reset();
+        if (this.props.theme !== prevProps.theme) {
+            this.removeInteractions(true);
+        } else if (this.props.measurement.mode === 'Reset') {
+            this.removeInteractions(true);
+            const nextmode = this.props.measurement.nextmode !== undefined ? this.props.measurement.nextmode : prevProps.measurement.mode;
+            this.props.changeMeasurementState({mode: nextmode});
+        } else if (this.props.measurement.mode && this.props.measurement.mode !== prevProps.measurement.mode) {
+            this.setupInteractions();
+            if (!prevProps.measurement.mode) {
+                Mousetrap.bind('del', this.triggerDelete);
+                Mousetrap.bind('backspace', this.triggerDelete);
+            }
+        } else if (!this.props.measurement.mode && prevProps.measurement.mode) {
+            this.removeInteractions();
+            Mousetrap.unbind('del', this.triggerDelete);
+            Mousetrap.unbind('backspace', this.triggerDelete);
         } else if (
-            this.sketchFeature && (
+            this.measureLayer && (
                 this.props.measurement.lenUnit !== prevProps.measurement.lenUnit ||
                 this.props.measurement.areaUnit !== prevProps.measurement.areaUnit ||
                 this.props.displayCrs !== prevProps.displayCrs
             )
         ) {
-            this.updateMeasurementResults(this.sketchFeature, this.props.measurement.drawing);
+            this.measureLayer.getSource().forEachFeature(feature =>
+                this.updateMeasurementResults(feature, this.props.measurement.drawing)
+            );
         }
     }
     render() {
         return null;
     }
-    addDrawInteraction = (newProps) => {
-        this.reset();
-
-        // Create a layer to draw on
-        this.measureLayer = new ol.layer.Vector({
-            source: new ol.source.Vector(),
-            zIndex: 1000000
-        });
-        this.props.map.addLayer(this.measureLayer);
-
-        let geometryType = newProps.measurement.geomType;
+    setupInteractions = () => {
+        if (!this.measureLayer) {
+            this.measureLayer = new ol.layer.Vector({
+                source: new ol.source.Vector(),
+                zIndex: 1000000
+            });
+            this.measureLayer.set('id', uuidv4());
+            this.props.map.addLayer(this.measureLayer);
+        }
+        let geometryType = this.props.measurement.mode;
         if (geometryType === 'Bearing') {
             geometryType = 'LineString';
         }
+        // If a draw interaction already exists, replace it
 
-        // create an interaction to draw with
-        this.drawInteraction = new ol.interaction.Draw({
+        const drawInteractionPos = this.drawInteraction ?
+            this.props.map.getInteractions().getArray().findIndex(item => item === this.drawInteraction) : null;
+
+        this.drawInteraction = new DrawInteraction({
             stopClick: true,
             source: this.measureLayer.getSource(),
             condition: (event) => { return event.originalEvent.buttons === 1; },
+            maxPoints: this.props.measurement.mode === 'Bearing' ? 2 : undefined,
             type: geometryType,
-            style: () => { return this.modifyInteraction ? [] : FeatureStyles.sketchInteraction(); }
+            style: []
         });
-
         this.drawInteraction.on('drawstart', (ev) => {
-            this.leaveTemporaryPickMode();
-            this.measureLayer.getSource().clear();
-            this.sketchFeature = ev.feature;
-            this.sketchFeature.setStyle(this.featureStyleFunction);
-            this.sketchFeature.on('change', evt => this.updateMeasurementResults(evt.target));
+            this.currentFeature = ev.feature;
+            this.currentFeature.setId(uuidv4());
+            this.currentFeature.set('measureMode', this.props.measurement.mode);
+            this.currentFeature.setStyle(this.featureStyleFunction);
+            this.currentFeature.on('change', evt => this.updateMeasurementResults(evt.target));
         });
         this.drawInteraction.on('drawend', () => {
-            this.updateMeasurementResults(this.sketchFeature, false);
-            this.enterTemporaryPickMode();
+            this.enterEditMode(this.currentFeature);
         });
+        if (drawInteractionPos !== null) {
+            this.drawInteraction.setActive(!this.modifyInteraction.getActive());
+            this.props.map.getInteractions().setAt(drawInteractionPos, this.drawInteraction);
+        } else {
+            this.drawInteraction.setActive(false);
+            this.props.map.addInteraction(this.drawInteraction);
 
-        this.props.map.addInteraction(this.drawInteraction);
-    };
-    reset = () => {
-        if (this.drawInteraction !== null) {
-            this.props.map.removeInteraction(this.drawInteraction);
-            this.drawInteraction = null;
-            this.leaveTemporaryPickMode();
-            this.props.map.removeLayer(this.measureLayer);
-            this.measureLayer = null;
-            this.sketchFeature = null;
+            // If draw interaction is missing, then also the select and modify interactions were missing
+            this.selectInteraction = new ol.interaction.Select({
+                layers: [this.measureLayer],
+                style: null,
+                hitTolerance: 5
+            });
+            this.modifyInteraction = new ol.interaction.Modify({
+                features: this.selectInteraction.getFeatures(),
+                condition: (event) => { return event.originalEvent.buttons === 1; },
+                insertVertexCondition: () => { return this.props.measurement.mode !== 'Bearing'; },
+                deleteCondition: (event) => { return ol.events.condition.shiftKeyOnly(event) && ol.events.condition.singleClick(event); },
+                style: (feature) => {
+                    // Hack to get cursor position over geometry...
+                    if (this.props.measurement.pickPositionCallback) {
+                        clearTimeout(this.pickPositionCallbackTimeout);
+                        this.props.measurement.pickPositionCallback(feature.getGeometry().getCoordinates());
+                    }
+                    return FeatureStyles.sketchInteraction();
+                }
+            });
+
+            this.props.map.addInteraction(this.selectInteraction);
+            this.props.map.addInteraction(this.modifyInteraction);
+
+            this.selectInteraction.setActive(true);
+            this.modifyInteraction.setActive(true);
+
+            this.modifyInteraction.on('modifyend', () => {
+                this.updateMeasurementResults(this.currentFeature, false);
+            });
+            this.props.map.on('singleclick', this.handleMapClick);
+            this.props.map.on('pointermove', this.clearPickPosition);
         }
     };
-    enterTemporaryPickMode = () => {
-        this.modifyInteraction = new ol.interaction.Modify({
-            features: new ol.Collection([this.sketchFeature]),
-            condition: (event) => { return event.originalEvent.buttons === 1; },
-            insertVertexCondition: () => { return this.props.measurement.geomType === 'Bearing' ? false : true; },
-            deleteCondition: (event) => { return ol.events.condition.shiftKeyOnly(event) && ol.events.condition.singleClick(event); },
-            style: (feature) => {
-                // Hack to get cursor position over geometry...
-                if (this.props.measurement.pickPositionCallback) {
-                    clearTimeout(this.pickPositionCallbackTimeout);
-                    this.props.measurement.pickPositionCallback(feature.getGeometry().getCoordinates());
-                }
-                return FeatureStyles.sketchInteraction();
-            }
-        });
-        this.props.map.on('pointermove', this.clearPickPosition);
-        this.modifyInteraction.on('modifyend', () => {
-            this.updateMeasurementResults(this.sketchFeature, false);
-        });
-        this.props.map.addInteraction(this.modifyInteraction);
-    };
-    leaveTemporaryPickMode = () => {
-        if (this.modifyInteraction) {
+    removeInteractions = (clearLayer) => {
+        if (this.drawInteraction !== null) {
+            this.currentFeature = null;
+            this.props.map.un('singleclick', this.handleMapClick);
             this.props.map.un('pointermove', this.clearPickPosition);
+            this.props.map.removeInteraction(this.drawInteraction);
+            this.drawInteraction = null;
+            this.props.map.removeInteraction(this.selectInteraction);
+            this.selectInteraction = null;
             this.props.map.removeInteraction(this.modifyInteraction);
             this.modifyInteraction = null;
+        }
+        if (this.measureLayer) {
+            if (clearLayer) {
+                this.props.removeLayer(this.measureLayer.get('id'));
+                this.props.map.removeLayer(this.measureLayer);
+                this.measureLayer = null;
+            } else {
+                // Serialize to global state
+                const format = new ol.format.GeoJSON();
+                const features = this.measureLayer.getSource().getFeatures().map(feature => {
+                    const featureObject = format.writeFeatureObject(feature);
+                    featureObject.styleName = 'default';
+                    featureObject.styleOptions = computeMeasureFeatureStyle(this.endMarkerOptions(feature));
+                    return featureObject;
+                });
+                const layer = {
+                    id: this.measureLayer.get('id'),
+                    type: 'vector',
+                    externallyManaged: true,
+                    crs: this.props.map.getView().getProjection().getCode(),
+                    layertreehidden: true
+                };
+                this.props.addLayerFeatures(layer, features);
+            }
+        }
+    };
+    createPoint = (coord) => {
+        this.currentFeature = new ol.Feature({geometry: new ol.geom.Point(coord)});
+        this.currentFeature.setId(uuidv4());
+        this.currentFeature.set('measureMode', this.props.measurement.mode);
+        this.currentFeature.setStyle(this.featureStyleFunction);
+        this.currentFeature.on('change', evt => this.updateMeasurementResults(evt.target));
+        this.measureLayer.getSource().addFeature(this.currentFeature);
+        this.enterEditMode(this.currentFeature);
+    };
+    enterEditMode = (feature) => {
+        this.currentFeature = feature;
+        this.updateMeasurementResults(this.currentFeature, false);
+        if (this.drawInteraction.getActive()) {
+            this.drawInteraction.setActive(false);
+            this.selectInteraction.setActive(true);
+            this.modifyInteraction.setActive(true);
+            this.selectInteraction.getFeatures().clear();
+            this.selectInteraction.getFeatures().push(this.currentFeature);
+        }
+    };
+    leaveEditMode = () => {
+        this.currentFeature = null;
+        this.selectInteraction.getFeatures().clear();
+        this.drawInteraction.setActive(true);
+        this.selectInteraction.setActive(false);
+        this.modifyInteraction.setActive(false);
+    };
+    triggerDelete = () => {
+        if (this.currentFeature) {
+            this.measureLayer.getSource().removeFeature(this.currentFeature);
+            this.props.changeMeasurementState({
+                mode: this.props.measurement.mode,
+                drawing: false,
+                measureId: null,
+                coordinates: null
+            });
+            this.setupInteractions();
+        }
+    };
+    handleMapClick = (evt) => {
+        if (!this.drawInteraction.getActive()) {
+            const features = this.props.map.getFeaturesAtPixel(evt.pixel, {hitTolerance: 5, layerFilter: layer => layer === this.measureLayer});
+            if (features.length === 0) {
+                const clickCoord = MapUtils.getHook(MapUtils.GET_SNAPPED_COORDINATES_FROM_PIXEL_HOOK)(evt.pixel);
+                if (this.props.measurement.mode === 'Point') {
+                    // Special handling for Point: create point feature directly instead of starting a draw interaction
+                    this.createPoint(clickCoord);
+                } else {
+                    this.leaveEditMode();
+                    // Immediately start new drawing
+                    this.drawInteraction.appendCoordinates([clickCoord]);
+                }
+            } else {
+                this.enterEditMode(features[0]);
+            }
         }
     };
     clearPickPosition = () => {
@@ -143,51 +258,61 @@ class MeasurementSupport extends React.Component {
         }
     };
     updateMeasurementResults = (feature, drawing = true) => {
-        const geomType = this.props.measurement.geomType;
+        const measureMode = feature.get('measureMode');
         const settings = {
             lenUnit: this.props.measurement.lenUnit,
             areaUnit: this.props.measurement.areaUnit,
-            decimals: this.props.measurement.decimals,
-            mapCrs: this.props.mapCrs,
-            displayCrs: this.props.displayCrs
+            displayCrs: this.props.displayCrs,
+            showPerimeterLength: this.props.measurement.showPerimeterLength
         };
-        MeasureUtils.updateFeatureMeasurements(feature, geomType, this.props.projection, settings);
-
-        // Only one segment for bearing measurement
-        if (geomType === 'Bearing' && feature.getGeometry().getCoordinates().length > 2) {
-            this.drawInteraction.finishDrawing();
-        }
+        MeasureUtils.updateFeatureMeasurements(feature, measureMode, this.props.projection, settings);
 
         this.measureLayer.getSource().changed();
         this.props.changeMeasurementState({
-            geomType: this.props.measurement.geomType,
+            mode: measureMode,
             drawing: drawing,
+            measureId: feature.getId(),
             coordinates: feature.getGeometry().getCoordinates(),
-            ...feature.get('measurements')
+            ...structuredClone(feature.get('measurements'))
         });
     };
     featureStyleFunction = (feature) => {
-        const geometryFunction = (f) => {
-            if (f.getGeometry().getType() === "Point") {
-                return new ol.geom.MultiPoint([f.getGeometry().getCoordinates()]);
-            } else if (f.getGeometry().getType() === "LineString") {
-                return new ol.geom.MultiPoint(f.getGeometry().getCoordinates());
-            }
-            return new ol.geom.MultiPoint(f.getGeometry().getCoordinates()[0]);
-        };
-        return [
-            ...FeatureStyles.measureInteraction(feature),
-            FeatureStyles.measureInteractionVertex({geometryFunction})
-        ];
+        const opts = computeMeasureFeatureStyle(this.endMarkerOptions(feature));
+        const styles = [...FeatureStyles.default(feature, opts)];
+        if (feature === this.currentFeature) {
+            const geometryFunction = (f) => {
+                if (f.getGeometry().getType() === "Point") {
+                    return new ol.geom.MultiPoint([f.getGeometry().getCoordinates()]);
+                } else if (f.getGeometry().getType() === "LineString") {
+                    return new ol.geom.MultiPoint(f.getGeometry().getCoordinates());
+                }
+                return new ol.geom.MultiPoint(f.getGeometry().getCoordinates()[0]);
+            };
+            styles.push(FeatureStyles.measureInteractionVertex({geometryFunction}));
+        }
+        return styles;
+    };
+    endMarkerOptions = (feature) => {
+        const opts = {};
+        const measureMode = feature.get('measureMode');
+        if (measureMode === 'LineString') {
+            opts.headmarker = this.props.measurement.lineHeadMarker;
+            opts.tailmarker = this.props.measurement.lineTailMarker;
+        } else if (measureMode === 'Bearing') {
+            opts.headmarker = this.props.measurement.bearingHeadMarker;
+            opts.tailmarker = this.props.measurement.bearingTailMarker;
+        }
+        opts.markerscale = this.props.measurement.markerScale;
+        return opts;
     };
 }
 
-const selector = createSelector([state => state, displayCrsSelector], (state, displaycrs) => ({
+export default connect((state) => ({
+    displayCrs: state.map.displayCrs,
     measurement: state.measurement,
-    mapCrs: state.map.projection,
-    displayCrs: displaycrs
-}));
-
-export default connect(selector, {
-    changeMeasurementState
+    theme: state.theme.current
+}), {
+    addLayerFeatures,
+    changeMeasurementState,
+    removeLayer
 })(MeasurementSupport);

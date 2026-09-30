@@ -1,18 +1,64 @@
-const fs = require("fs");
-const path = require("path");
+#!/usr/bin/env node
+
+/**
+ * Copyright Sourcepole AG
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+
 const reactDocs = require("react-docgen");
 
-const qwcPluginDir = './qwc2/plugins';
+const fs = require("fs");
+const path = require("path");
+
+const findAllDefinitionsResolver = new reactDocs.builtinResolvers.FindAllDefinitionsResolver();
+
+const qwcPluginDir = __dirname + '/../plugins';
 let pluginData = [];
 
 fs.readdirSync(qwcPluginDir).forEach(entry => {
     if (entry.endsWith(".jsx")) {
         const file = path.resolve(qwcPluginDir, entry);
         const contents = fs.readFileSync(file);
-        pluginData.push(reactDocs.parse(contents, reactDocs.resolver.findAllComponentDefinitions));
+        pluginData.push(reactDocs.parse(contents, {resolver: findAllDefinitionsResolver}));
     }
 });
 pluginData = pluginData.flat();
+
+let mapToolPluginData = [];
+fs.readdirSync(qwcPluginDir + "/map").forEach(entry => {
+    if (entry.endsWith(".jsx")) {
+        const file = path.resolve(qwcPluginDir, "map", entry);
+        const contents = fs.readFileSync(file);
+        mapToolPluginData.push(reactDocs.parse(contents, {resolver: findAllDefinitionsResolver}));
+    }
+});
+mapToolPluginData = mapToolPluginData.flat();
+
+let plugin3dData = [];
+fs.readdirSync(qwcPluginDir + "/map3d").forEach(entry => {
+    if (entry.endsWith(".jsx")) {
+        const file = path.resolve(qwcPluginDir, "map3d", entry);
+        const contents = fs.readFileSync(file);
+        plugin3dData.push(reactDocs.parse(contents, {resolver: findAllDefinitionsResolver}));
+    }
+});
+plugin3dData = plugin3dData.flat();
+
+let extraPluginData = [];
+const qwcExtraPluginDir = __dirname + '/../extra/plugins';
+fs.readdirSync(qwcExtraPluginDir).forEach(entry => {
+    if (entry.endsWith(".jsx")) {
+        const file = path.resolve(qwcExtraPluginDir, entry);
+        const contents = fs.readFileSync(file);
+        extraPluginData.push(reactDocs.parse(contents, {resolver: findAllDefinitionsResolver}));
+    }
+});
+extraPluginData = extraPluginData.flat();
+
 
 function parsePropType(type) {
     if (type.name === 'shape') {
@@ -23,9 +69,55 @@ function parsePropType(type) {
         return '[' + parsePropType(type.value) + "]";
     } else if (type.name === 'union') {
         return '{' + type.value.map(entry => parsePropType(entry)).join(", ") + '}';
+    } else if (type.name === 'enum') {
+        return `{${type.value.map(x => x.value).join(", ")}}`;
+    } else if (type.name === 'objectOf') {
+        return '<key>: ' + parsePropType(type.value);
     } else {
         return type.name;
     }
+}
+function parsePropDesc(prop) {
+    if (prop.type.name === 'shape') {
+        return prop.description.replaceAll("\n", "<br />") + "<br />" + Object.entries(prop.type.value).map(([name, subprop]) => {
+            return "- `" + name + "`: " + subprop.description;
+        }).join("<br />");
+    } else {
+        return prop.description.replaceAll("\n", "<br />");
+    }
+}
+function genPluginDoc(plugin) {
+    let output = "";
+    if (!plugin.description) {
+        return "";
+    }
+    output += `## ${plugin.displayName}<a name="${plugin.displayName.toLowerCase()}"></a>\n\n`;
+    output += plugin.description + "\n\n";
+
+    const props = Object.entries(plugin.props || {}).filter(entry => entry[1].description);
+    if (props.length > 0) {
+        output += "| Property | Type | Description | Default value |\n";
+        output += "|----------|------|-------------|---------------|\n";
+        props.forEach(([name, prop]) => {
+            if (!prop.description) {
+                return;
+            }
+            const defaultValue = prop.defaultValue ? prop.defaultValue.value.split("\n").map(x => '`' + x.replace(' ', ' ') + '`').join("<br />") : "`undefined`";
+            const type = "`" + parsePropType(prop.type).replaceAll(' ', ' ').replaceAll("\n", "`<br />`") + "`";
+            output += `| ${name} | ${type} | ${parsePropDesc(prop)} | ${defaultValue} |\n`;
+        });
+        output += "\n";
+    }
+
+    plugin.methods.forEach(method => {
+        if (method.docblock) {
+            const params = method.params.map(param => param.name).join(",");
+            output += `**${method.name}(${params})**\n\n`;
+            output += (method.docblock || "") + "\n";
+            output += "\n";
+        }
+    });
+    return output;
 }
 
 // Write markdown output
@@ -41,32 +133,61 @@ pluginData.forEach(plugin => {
     output += `* [${plugin.displayName}](#${plugin.displayName.toLowerCase()})\n`;
 });
 output += "\n";
-output += "---\n";
-pluginData.forEach(plugin => {
+output += "[Map support plugins](#mapSupportPlugins)\n";
+output += "\n";
+mapToolPluginData.forEach(plugin => {
     if (!plugin.description) {
         return;
     }
-    output += `${plugin.displayName}<a name="${plugin.displayName.toLowerCase()}"></a>\n`;
-    output += "----------------------------------------------------------------\n";
-    output += plugin.description + "\n";
-    output += "\n";
-    output += "| Property | Type | Description | Default value |\n";
-    output += "|----------|------|-------------|---------------|\n";
-    let documentedProps = 0;
-    Object.entries(plugin.props || {}).forEach(([name, prop]) => {
-        if (!prop.description) {
-            return;
-        }
-        ++documentedProps;
-        const defaultValue = prop.defaultValue ? prop.defaultValue.value.split("\n").map(x => '`' + x.replace(' ', ' ') + '`').join("<br />") : "`undefined`";
-        const type = "`" + parsePropType(prop.type).replaceAll(' ', ' ').replaceAll("\n", "`<br />`") + "`";
-        output += `| ${name} | ${type} | ${prop.description.replaceAll("\n", "<br />")} | ${defaultValue} |\n`;
-    });
-    if (documentedProps === 0) {
-        output += "|\n";
-    }
-    output += "\n";
+    output += `* [${plugin.displayName}](#${plugin.displayName.toLowerCase()})\n`;
 });
-
-fs.writeFileSync('./qwc2/doc/plugins.md', output);
-console.log("Plugin documentation written to doc/src/plugins.md!");
+output += "\n";
+output += "[3D Plugins](#plugins3d)\n";
+output += "\n";
+plugin3dData.forEach(plugin => {
+    if (!plugin.description) {
+        return;
+    }
+    output += `* [${plugin.displayName}](#${plugin.displayName.toLowerCase()})\n`;
+});
+output += "\n";
+output += "[Extra Plugins](#extraPlugins)\n";
+output += "\n";
+extraPluginData.forEach(plugin => {
+    if (!plugin.description) {
+        return;
+    }
+    output += `* [${plugin.displayName}](#${plugin.displayName.toLowerCase()})\n`;
+});
+output += "\n";
+output += "---\n";
+pluginData.forEach(plugin => {
+    output += genPluginDoc(plugin);
+});
+output += "---\n";
+output += "# Map support plugins<a name=\"mapSupportPlugins\"></a>\n";
+output += "\n";
+output += "These plugins must be listed as children of the [Map](#map) plugin.";
+output += "\n\n";
+mapToolPluginData.forEach(plugin => {
+    output += genPluginDoc(plugin);
+});
+output += "---\n";
+output += "# 3D Plugins<a name=\"plugins3d\"></a>\n";
+output += "\n";
+output += "These plugins must be listed as children of the [View3D](#view3d) plugin.";
+output += "\n\n";
+plugin3dData.forEach(plugin => {
+    output += genPluginDoc(plugin);
+});
+output += "---\n";
+output += "# Extra plugins<a name=\"extraPlugins\"></a>\n";
+output += "\n";
+output += "These plugins are not enabled in the stock viewer, and must be enabled in a custom viewer build.";
+output += "\n\n";
+extraPluginData.forEach(plugin => {
+    output += genPluginDoc(plugin);
+});
+fs.writeFileSync(__dirname + '/../doc/plugins.md', output);
+/* eslint-disable-next-line */
+console.log("Plugin documentation written to doc/plugins.md!");

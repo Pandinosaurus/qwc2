@@ -1,11 +1,8 @@
 .icon {
-    display: inline-block;
-}
-
-.icon:before {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
+    touch-action: none;
 }
 
 img.icon {
@@ -22,4 +19,13 @@ span.icon_xlarge:before {
 
 .icon_clickable {
     cursor: pointer;
+}
+
+.icon_disabled {
+    cursor: default;
+    color: var(--text-color-disabled);
+}
+
+.icon_inactive {
+    color: #ccc;
 }

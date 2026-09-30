@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,104 +7,123 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+
 import classNames from 'classnames';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import LocaleUtils from '../../utils/LocaleUtils';
 import MiscUtils from '../../utils/MiscUtils';
+import Icon from '../Icon';
+
 import './style/TextInput.css';
 
-class TextInput extends React.Component {
+
+export default class TextInput extends React.Component {
     static propTypes = {
+        addLinkAnchors: PropTypes.bool,
+        className: PropTypes.string,
+        clearValue: PropTypes.string,
         disabled: PropTypes.bool,
+        focusOnRef: PropTypes.bool,
         multiline: PropTypes.bool,
         name: PropTypes.string,
         onChange: PropTypes.func,
+        onNoChange: PropTypes.func,
         placeholder: PropTypes.string,
         readOnly: PropTypes.bool,
         required: PropTypes.bool,
+        showClear: PropTypes.bool,
         style: PropTypes.object,
         value: PropTypes.string
     };
     static defaultProps = {
-        placeholder: ""
+        clearValue: "",
+        placeholder: "",
+        showClear: true
     };
     state = {
+        focus: false,
         value: "",
         valueRev: 0,
         curValue: "",
-        changed: false
+        changed: false,
+        committing: false
     };
     constructor(props) {
         super(props);
-        this.skipNextCommitOnBlur = false;
         this.focusEnterClick = false;
-        this.initialHeight = null;
         this.input = null;
-        this.formEl = null;
         this.tooltipEl = null;
         this.tooltipTimeout = null;
+        this.id = uuidv4();
     }
     static getDerivedStateFromProps(nextProps, state) {
-        if (state.value !== nextProps.value) {
+        if (state.value !== nextProps.value && !state.committing) {
             return {
                 value: nextProps.value,
                 valueRev: state.valueRev + 1,
-                curValue: nextProps.value || "",
+                curValue: MiscUtils.sanitizeHtml(nextProps.value || ""),
                 changed: false
             };
         }
         return null;
-    }
-    componentDidMount() {
-        this.setDefaultValue(this.state.value, this.state.valueRev, -1);
     }
     componentDidUpdate(prevProps, prevState) {
         this.setDefaultValue(this.state.value, this.state.valueRev, prevState.valueRev);
     }
     setDefaultValue = (value, valueRev, prevValueRef) => {
         if (valueRev > prevValueRef) {
-            this.input.innerHTML = value;
-            // Move cursor to end
-            if (this.input === document.activeElement) {
-                const range = document.createRange();
-                range.selectNodeContents(this.input);
-                range.collapse(false);
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
+            this.input.innerHTML = MiscUtils.sanitizeHtml((value || "").replaceAll('\n', this.props.multiline ? '<br />' : ''));
         }
     };
     render() {
-        const className = classNames({
-            "text-input": true,
-            "text-input-disabled": this.props.disabled,
-            "text-input-readonly": this.props.readOnly || !this.state.curValue
+        const wrapperClassName = classNames({
+            "TextInput": true,
+            "text-input-wrapper-multiline": this.props.multiline,
+            "text-input-wrapper": true,
+            "text-input-wrapper-focused": this.state.focus
         });
+        const preClassName = classNames({
+            "text-input": true,
+            "text-input-multiline": this.props.multiline,
+            "text-input-disabled": this.props.disabled,
+            "text-input-readonly": this.props.readOnly || !this.state.curValue,
+            "text-input-invalid": this.props.required && !this.state.curValue
+        });
+        const showClear = this.props.showClear && this.state.focus && !this.props.multiline && !this.props.disabled && !this.props.readOnly && this.state.curValue;
+        const style = {
+            ...this.props.style
+        };
+        if (showClear) {
+            style.marginRight = '1.5em';
+        }
         return (
-            <div className="text-input-wrapper">
+            <div className={wrapperClassName + " " + (this.props.className || "")} onClick={MiscUtils.killEvent}>
                 {this.props.name ? (
                     <textarea
                         className="text-input-form-el"
                         name={this.props.name}
                         onChange={() => {}}
-                        ref={el => {this.formEl = el; }}
                         required={this.props.required}
-                        value={this.props.value} />
+                        tabIndex="-1"
+                        value={this.state.curValue} />
                 ) : null}
                 <pre
-                    className={className}
+                    className={preClassName}
                     contentEditable={!this.props.disabled && !this.props.readOnly}
                     onBlur={this.onBlur}
                     onChange={this.onChange}
-                    onClick={this.onClick}
+                    onCopy={(ev) => this.onCopy(ev, false)}
+                    onCut={(ev) => this.onCopy(ev, true)}
+                    onFocus={this.onFocus}
                     onInput={this.onChange}
                     onKeyDown={this.onKeyDown}
                     onMouseDown={this.onMouseDown}
                     onMouseLeave={this.onMouseLeave}
                     onMouseMove={this.onMouseMove}
-                    ref={el => {this.input = el;}}
-                    style={this.props.style}
+                    ref={this.storeRef}
+                    style={style}
                 />
                 {!this.state.curValue ? (
                     <div className="text-input-placeholder">{this.props.placeholder}</div>
@@ -112,43 +131,88 @@ class TextInput extends React.Component {
                 {this.props.multiline ? (
                     <div
                         className="text-input-resize-handle"
-                        onMouseDown={this.startResize} />
+                        onPointerDown={this.startResize} />
+                ) : null}
+                {showClear ? (
+                    <div className="text-input-clear-icon">
+                        <Icon icon="clear" onClick={this.clear} onMouseDown={MiscUtils.killEvent} />
+                    </div>
                 ) : null}
             </div>
         );
     }
-    onChange = (ev) => {
-        const curValue = ev.target.innerHTML.replace(/<br\s*\/?>$/, '');
-        this.setState({curValue: curValue, changed: true});
-        if (this.formEl.form) {
-            // Notify parent form picks of changed field
-            // https://stackoverflow.com/a/46012210
-            const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-            nativeSet.call(this.formEl, curValue);
-            this.formEl.dispatchEvent(new Event('input', { bubbles: true }));
+    storeRef = (el) => {
+        if (el) {
+            this.input = el;
+            this.setDefaultValue(this.state.value, this.state.valueRev, -1);
+            if (this.props.focusOnRef) {
+                el.focus();
+            }
         }
+    };
+    setInputContents = () => {
+        this.input.innerHTML = (this.state.value || "").replaceAll('\n', this.props.multiline ? '<br />' : '');
+    };
+    onCopy = (ev, cut) => {
+        ev.preventDefault();
+        const selection = window.getSelection();
+        const plainText = selection.toString();
+        if (ev.clipboardData) {
+            ev.clipboardData.setData('text/plain', plainText);
+        }
+        if (cut) {
+            this.clear();
+        }
+    };
+    clear = () => {
+        const clearValue = this.props.clearValue;
+        this.props.onChange(clearValue);
+        this.setState(state => ({curValue: this.props.clearValue, changed: state.value !== clearValue}));
+        this.input.innerHTML = clearValue;
+    };
+    onChange = (ev) => {
+        let curValue = MiscUtils.sanitizeHtml(ev.target.innerText.replace(/<br\s*\/?>$/, '').replace(/\n$/, ''));
+        if (!this.props.multiline) {
+            curValue = curValue.replace('\n', '');
+        }
+        this.setState({curValue: curValue, changed: true});
     };
     onBlur = () => {
-        if (!this.skipNextCommitOnBlur) {
-            this.commit();
-        }
+        this.setState({focus: false});
+        this.commit();
     };
-    onClick = (ev) => {
-        if (ev.ctrlKey && this.focusEnterClick && ev.target.nodeName === 'A' && ev.target.href) {
-            window.open(ev.target.href, "_blank");
-        }
+    onFocus = (ev) => {
+        this.setState({focus: true});
+        window.setTimeout(function() {
+            if (window.getSelection && document.createRange) {
+                const range = document.createRange();
+                range.selectNodeContents(ev.target);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            } else if (document.body.createTextRange) {
+                const range = document.body.createTextRange();
+                range.moveToElementText(ev.target);
+                range.select();
+            }
+        }, 1);
     };
-    onMouseDown = () => {
-        this.focusEnterClick = document.activeElement !== this.input;
+    onMouseDown = (ev) => {
+        const el = document.elementFromPoint(ev.clientX, ev.clientY);
+        if (el?.nodeName === 'A' && (this.props.readOnly || this.props.disabled || ev.ctrlKey)) {
+            window.open(el.href, el.target);
+        }
     };
     onMouseMove = (ev) => {
         const isTouch = (('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (navigator.msMaxTouchPoints > 0));
         clearTimeout(this.tooltipTimeout);
         const editable = !this.props.disabled && !this.props.readOnly;
         if (!isTouch && editable && ev.target.nodeName === 'A') {
+            const container = MiscUtils.appContainer(ev.target);
             const rect = ev.target.getBoundingClientRect();
-            const left = rect.left + window.scrollX;
-            const bottom = rect.bottom + window.scrollY + 2;
+            const containerRect = container.getBoundingClientRect();
+            const left = rect.left - containerRect.left;
+            const bottom = rect.bottom - containerRect.top + 2;
             this.tooltipTimeout = setTimeout(() => {
                 if (!this.tooltipEl) {
                     this.tooltipEl = document.createElement("span");
@@ -156,78 +220,67 @@ class TextInput extends React.Component {
                     this.tooltipEl.innerHTML = LocaleUtils.tr("misc.ctrlclickhint");
                     this.tooltipEl.style.position = 'absolute';
                     this.tooltipEl.style.zIndex = 10000000000;
-                    document.body.appendChild(this.tooltipEl);
+                    container.appendChild(this.tooltipEl);
                 }
                 this.tooltipEl.style.left = left + 'px';
                 this.tooltipEl.style.top = bottom + 'px';
                 this.tooltipTimeout = null;
             }, 250);
         } else if (this.tooltipEl) {
-            document.body.removeChild(this.tooltipEl);
+            this.tooltipEl.remove();
             this.tooltipEl = null;
         }
     };
     onMouseLeave = () => {
         clearTimeout(this.tooltipTimeout);
         if (this.tooltipEl) {
-            document.body.removeChild(this.tooltipEl);
+            this.tooltipEl.remove();
             this.tooltipEl = null;
         }
     };
     onKeyDown = (ev) => {
-        if (ev.keyCode === 17) { // Ctrl
-            const prevValue = this.input.contentEditable;
-            this.input.contentEditable = false;
-            window.addEventListener("keyup", () => {
-                this.input.contentEditable = prevValue;
-            }, {once: true});
-        } else if (ev.keyCode === 13 && !this.props.multiline) { // Enter
+        if (ev.key === 'Enter' && !this.props.multiline) {
             ev.preventDefault();
             this.commit();
-        } else if (ev.keyCode === 27) { // Esc
+        } else if (ev.key === 'Escape') {
             this.setState((state) => ({
                 value: this.props.value,
                 valueRev: state.valueRev + 1,
                 curValue: this.props.value || "",
                 changed: false
-            }));
-            this.skipNextCommitOnBlur = true;
-            ev.target.blur();
+            }), () => ev.target.blur());
+            MiscUtils.killEvent(ev);
         }
     };
     commit = () => {
         if (this.state.changed) {
-            const valueWithLinks = MiscUtils.addLinkAnchors(this.state.curValue);
-            this.props.onChange(valueWithLinks);
-            if (this.formEl.form) {
-                // Notify parent form picks of changed field
-                // https://stackoverflow.com/a/46012210
-                const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-                nativeSet.call(this.formEl, this.state.curValue);
-                this.formEl.dispatchEvent(new Event('input', { bubbles: true }));
-            }
+            this.setState(state => {
+                const value = this.props.addLinkAnchors ? MiscUtils.addLinkAnchors(state.curValue) : state.curValue;
+                return {value: value, changed: false, committing: true};
+            }, () => {
+                this.setState({committing: false});
+                this.props.onChange(this.state.value);
+            });
+        } else {
+            this.props.onNoChange?.();
         }
     };
     startResize = (ev) => {
-        const input = ev.target.previousElementSibling;
-        if (!input) {
+        const container = ev.target.parentElement;
+        if (!container) {
             return;
         }
-        const startHeight = input.offsetHeight;
-        if (this.initialHeight === null) {
-            this.initialHeight = startHeight;
-        }
+        const startHeight = container.offsetHeight;
         const startMouseY = ev.clientY;
         const resizeInput = (event) => {
-            input.style.height = Math.max(this.initialHeight, (startHeight + (event.clientY - startMouseY))) + 'px';
+            container.style.height = Math.max(MiscUtils.convertEmToPx(2), (startHeight + (event.clientY - startMouseY))) + 'px';
         };
-        document.body.style.userSelect = 'none';
-        window.addEventListener("mousemove", resizeInput);
-        window.addEventListener("mouseup", () => {
-            document.body.style.userSelect = '';
-            window.removeEventListener("mousemove", resizeInput);
+        const appContainer = MiscUtils.appContainer(ev.target);
+        appContainer.style.userSelect = 'none';
+        ev.view.addEventListener("pointermove", resizeInput);
+        ev.view.addEventListener("pointerup", () => {
+            appContainer.style.userSelect = '';
+            ev.view.removeEventListener("pointermove", resizeInput);
         }, {once: true});
     };
 }
-
-export default TextInput;

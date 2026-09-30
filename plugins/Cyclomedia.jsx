@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,17 +7,20 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import PropTypes from 'prop-types';
+
 import {addLayer, addLayerFeatures, changeLayerProperty, removeLayer, LayerRole} from '../actions/layers';
 import {setCurrentTask} from '../actions/task';
 import ResizeableWindow from '../components/ResizeableWindow';
-import Spinner from '../components/Spinner';
+import Spinner from '../components/widgets/Spinner';
 import CoordinatesUtils from '../utils/CoordinatesUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MapUtils from '../utils/MapUtils';
+import ResourceRegistry from '../utils/ResourceRegistry';
+
 import './style/Cyclomedia.css';
-import MapUtils from 'qwc2/utils/MapUtils';
-import ResourceRegistry from 'qwc2/utils/ResourceRegistry';
 
 
 const Status = {LOGIN: 0, INITIALIZING: 1, INITIALIZED: 2, ERROR: 3, LOADPOS: 4, HAVEPOS: 5};
@@ -36,6 +39,11 @@ class Cyclomedia extends React.Component {
         click: PropTypes.object,
         /** OAuth client ID. */
         clientId: PropTypes.string,
+        /** Fields from user_infos which contain username and password which will be pre-inserted into the login form. */
+        credentialUserInfoFields: PropTypes.shape({
+            username: PropTypes.string,
+            password: PropTypes.string
+        }),
         /** The cyclomedia version. */
         cyclomediaVersion: PropTypes.string,
         /** Whether to display Cyclomedia measurement geometries on the map. */
@@ -61,10 +69,11 @@ class Cyclomedia extends React.Component {
         projection: PropTypes.string,
         removeLayer: PropTypes.func,
         setCurrentTask: PropTypes.func,
-        theme: PropTypes.object
+        theme: PropTypes.object,
+        userInfos: PropTypes.object
     };
     static defaultProps = {
-        cyclomediaVersion: '23.6',
+        cyclomediaVersion: '25.7',
         displayMeasurements: true,
         geometry: {
             initialWidth: 480,
@@ -74,7 +83,7 @@ class Cyclomedia extends React.Component {
             initiallyDocked: false,
             side: 'left'
         },
-        maxMapScale: 10000,
+        maxMapScale: 5000,
         projection: 'EPSG:3857'
     };
     state = {
@@ -88,6 +97,10 @@ class Cyclomedia extends React.Component {
         super(props);
         this.iframe = null;
         this.iframePollIntervall = null;
+        if (props.credentialUserInfoFields && props.userInfos) {
+            this.state.username = props.userInfos[props.credentialUserInfoFields.username];
+            this.state.password = props.userInfos[props.credentialUserInfoFields.password];
+        }
     }
     componentDidUpdate(prevProps, prevState) {
         if (!prevProps.active && this.props.active) {
@@ -193,9 +206,9 @@ class Cyclomedia extends React.Component {
                 initialHeight={this.props.geometry.initialHeight} initialWidth={this.props.geometry.initialWidth}
                 initialX={this.props.geometry.initialX} initialY={this.props.geometry.initialY}
                 initiallyDocked={this.props.geometry.initiallyDocked}
-                onClose={this.onClose} splitScreenWhenDocked title={LocaleUtils.trmsg("cyclomedia.title")}
-                >
-                <div className="cyclomedia-body" role="body">
+                onClose={this.onClose} splitScreenWhenDocked title={LocaleUtils.tr("cyclomedia.title")} usePortal={false}
+            >
+                <div className="cyclomedia-body">
                     {this.props.mapScale > this.props.maxMapScale && this.state.status > Status.LOGIN ? (
                         <div className="cyclomedia-scale-hint">
                             {LocaleUtils.tr("cyclomedia.scalehint", this.props.maxMapScale)}
@@ -210,8 +223,9 @@ class Cyclomedia extends React.Component {
         );
     }
     setIframeRef = (iframe) => {
-        if (iframe) {
+        if (iframe && iframe !== this.iframe) {
             this.iframe = iframe;
+            clearInterval(this.iframePollIntervall);
             this.iframePollIntervall = setInterval(() => this.setupIframe(iframe), 500);
         }
     };
@@ -268,7 +282,7 @@ class Cyclomedia extends React.Component {
         coordinates.slice(1).forEach(coo => context.lineTo(coo[0], coo[1]));
         context.closePath();
         context.fill();
-        ResourceRegistry.addResource("cyclomedia-cone", context.canvas);
+        ResourceRegistry.addResource("cyclomedia-cone", context.canvas.toDataURL());
         const feature = {
             geometry: {
                 type: 'Point',
@@ -279,7 +293,8 @@ class Cyclomedia extends React.Component {
             styleOptions: {
                 img: "cyclomedia-cone",
                 rotation: posData.yaw,
-                size: dimensions
+                size: dimensions,
+                anchor: [0.5, 1]
             }
         };
         const layer = {
@@ -322,10 +337,10 @@ class Cyclomedia extends React.Component {
             <!DOCTYPE html>
             <html>
             <head>
-            <script type="text/javascript" src="https://unpkg.com/react@16.12.0/umd/react.production.min.js"></script>
-            <script type="text/javascript" src="https://unpkg.com/react-dom@16.12.0/umd/react-dom.production.min.js"></script>
-            <script type="text/javascript" src="https://streetsmart.cyclomedia.com/api/v${this.props.cyclomediaVersion}/StreetSmartApi.js"></script>
-            <script type="text/javascript">
+            <script nonce="${window.__CSP_NONCE__ ?? ''}" type="text/javascript" src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+            <script nonce="${window.__CSP_NONCE__ ?? ''}" type="text/javascript" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+            <script nonce="${window.__CSP_NONCE__ ?? ''}" type="text/javascript" src="https://streetsmart.cyclomedia.com/api/v${this.props.cyclomediaVersion}/StreetSmartApi.js"></script>
+            <script nonce="${window.__CSP_NONCE__ ?? ''}" type="text/javascript">
             let apiInitialized = false;
             let initCallback = null;
             let posCallback = null;
@@ -428,58 +443,88 @@ class Cyclomedia extends React.Component {
         `;
     };
     addRecordingsWFS = () => {
+        // Maximum tile size in map CRS units to avoid exceeding the feature limit per request.
+        // ~1000 m in metric CRS, ~0.01° (≈ 1000 m) in geographic CRS, ~3280 ft in imperial CRS.
+        const crsUnits = CoordinatesUtils.getUnits(this.props.mapCrs);
+        const MAX_TILE_SIZE = crsUnits === 'degrees' ? 0.01 : crsUnits === 'ft' ? 3280 : 1000;
         const layer = {
-            uuid: 'cyclomedia-recordings',
             id: 'cyclomedia-recordings',
             type: 'wfs',
             loader: (vectorSource, extent, resolution, projection, success, failure) => {
-                const bbox = CoordinatesUtils.reprojectBbox(extent, projection.getCode(), this.props.projection);
-                const postData = `
-                    <wfs:GetFeature service="WFS" version="1.1.0" resultType="results" outputFormat="text/xml; subtype=gml/3.1.1" xmlns:wfs="http://www.opengis.net/wfs">
-                        <wfs:Query typeName="atlas:Recording" srsName="${this.props.projection}" xmlns:atlas="http://www.cyclomedia.com/atlas">
-                            <ogc:Filter xmlns:ogc="http://www.opengis.net/ogc">
-                                <ogc:And>
-                                    <ogc:BBOX>
-                                        <gml:Envelope srsName="${this.props.projection}" xmlns:gml="http://www.opengis.net/gml">
-                                        <gml:lowerCorner>${bbox[0]} ${bbox[1]}</gml:lowerCorner>
-                                        <gml:upperCorner>${bbox[2]} ${bbox[3]}</gml:upperCorner>
-                                        </gml:Envelope>
-                                    </ogc:BBOX>
-                                    <ogc:PropertyIsNull>
-                                        <ogc:PropertyName>expiredAt</ogc:PropertyName>
-                                    </ogc:PropertyIsNull>
-                                </ogc:And>
-                            </ogc:Filter>
-                        </wfs:Query>
-                    </wfs:GetFeature>
-                `;
-                const xhr = new XMLHttpRequest();
-                xhr.open('POST', 'https://atlasapi.cyclomedia.com/api/Recordings/wfs');
-                xhr.setRequestHeader("Authorization", "Basic " + btoa(this.state.username + ":" + this.state.password));
-                const onError = function() {
+                const [minx, miny, maxx, maxy] = CoordinatesUtils.reprojectBbox(extent, projection.getCode(), this.props.mapCrs);
+                const width = maxx - minx;
+                const height = maxy - miny;
+                // Cyclomedia WFS only returns up to 3000 points per request.
+                // Split the bbox into tiles so that no tile exceeds MAX_TILE_SIZE in each dimension.
+                // Each tile is expanded by OVERLAP on every side so that features on tile borders
+                // are reliably included. Duplicate features are removed afterwards via their id.
+                const OVERLAP = MAX_TILE_SIZE * 0.05; // 5 % of tile size
+                const cols = Math.max(1, Math.ceil(width / MAX_TILE_SIZE));
+                const rows = Math.max(1, Math.ceil(height / MAX_TILE_SIZE));
+                const tileW = width / cols;
+                const tileH = height / rows;
+
+                const tiles = [];
+                for (let row = 0; row < rows; row++) {
+                    for (let col = 0; col < cols; col++) {
+                        tiles.push([
+                            minx + col * tileW - OVERLAP,
+                            miny + row * tileH - OVERLAP,
+                            minx + (col + 1) * tileW + OVERLAP,
+                            miny + (row + 1) * tileH + OVERLAP
+                        ]);
+                    }
+                }
+
+                const authHeader = "Basic " + btoa(this.state.username + ":" + this.state.password);
+                const onError = () => {
                     vectorSource.removeLoadedExtent(extent);
                     failure();
                 };
-                xhr.onerror = onError;
-                xhr.onload = () => {
-                    if (xhr.status === 200) {
-                        const features = vectorSource.getFormat().readFeatures(xhr.responseText,
-                            {
-                                dataProjection: this.props.projection,
+
+                let completed = 0;
+                let hasError = false;
+                const allFeatures = [];
+
+                tiles.forEach((tile) => {
+                    const bboxstr = tile.join(",");
+                    const reqUrl = `https://atlasapi.cyclomedia.com/api/recording/wfs?service=WFS&version=1.1.0&request=GetFeature&typename=atlas:Recording&srsname=${this.props.mapCrs}&bbox=${bboxstr}&maxFeatures=10000`;
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', reqUrl);
+                    xhr.setRequestHeader("Authorization", authHeader);
+                    xhr.onerror = () => {
+                        if (!hasError) {
+                            hasError = true;
+                            onError();
+                        }
+                    };
+                    xhr.onload = () => {
+                        if (hasError) {
+                            return;
+                        }
+                        if (xhr.status === 200) {
+                            const features = vectorSource.getFormat().readFeatures(xhr.responseText, {
+                                dataProjection: this.props.mapCrs,
                                 featureProjection: projection.getCode()
-                            }
-                        );
-                        vectorSource.addFeatures(features);
-                        success(features);
-                    } else {
-                        onError();
-                    }
-                };
-                xhr.send(postData);
+                            });
+                            allFeatures.push(...features);
+                        } else {
+                            hasError = true;
+                            onError();
+                            return;
+                        }
+                        completed++;
+                        if (completed === tiles.length) {
+                            vectorSource.addFeatures(allFeatures);
+                            success(allFeatures);
+                        }
+                    };
+                    xhr.send();
+                });
             },
             name: 'atlas:Recording',
             version: '1.1.0',
-            projection: this.props.projection,
+            projection: this.props.mapCrs,
             formats: ['text/xml; subtype=gml/3.1.1'],
             invertAxisOrientation: true,
             role: LayerRole.SELECTION,
@@ -503,7 +548,8 @@ export default connect((state) => ({
     click: state.map.click,
     mapCrs: state.map.projection,
     mapScale: MapUtils.computeForZoom(state.map.scales, state.map.zoom),
-    theme: state.theme.current
+    theme: state.theme.current,
+    userInfos: state.localConfig.user_infos
 }), {
     addLayer: addLayer,
     addLayerFeatures: addLayerFeatures,

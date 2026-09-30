@@ -1,24 +1,12 @@
-div.snapping-toolbar-container {
-    position: absolute;
-    bottom: 2em;
-    left: 0;
-    right: 0;
-    text-align: center;
-    pointer-events: none;
-    z-index: 3;
+div.snapping-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
 }
 
-div.snapping-toolbar-container > div {
-    display: inline-flex;
-    align-items: center;
-    line-height: 1.5em;
-    position: relative;
-    max-width: 95%;
-    pointer-events: all;
-    padding: 0.25em 0.5em;
-    background-color: var(--container-bg-color);
-    box-shadow: 0px -2px 4px rgba(136, 136, 136, 0.5);
-    border-bottom: 1px solid rgba(136, 136, 136, 0.5);
+span.snapping-toolbar-label {
+    font-size: 85%;
+    white-space: nowrap;
 }
 
 div.snapping-toolbar-container div.spinner {

@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,61 +7,64 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import classNames from 'classnames';
+
+import axios from 'axios';
 import isEmpty from 'lodash.isempty';
+import isEqual from 'lodash.isequal';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import {LayerRole, setFilter} from '../actions/layers';
 import {setCurrentTask} from '../actions/task';
 import Icon from '../components/Icon';
+import MapButton from '../components/MapButton';
+import MapSelection from '../components/MapSelection';
+import PickFeature from '../components/PickFeature';
 import SideBar from '../components/SideBar';
+import ButtonBar from '../components/widgets/ButtonBar';
+import ComboBox from '../components/widgets/ComboBox';
 import DateTimeInput from '../components/widgets/DateTimeInput';
+import TextInput from '../components/widgets/TextInput';
 import ToggleSwitch from '../components/widgets/ToggleSwitch';
 import ConfigUtils from '../utils/ConfigUtils';
+import DataServiceExprUtils from '../utils/DataServiceExprUtils';
+import {defaultHighlightStyle} from '../utils/FeatureStyles';
+import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
+import {registerPermalinkDataStoreHook, unregisterPermalinkDataStoreHook} from '../utils/PermaLinkUtils';
+
 import './style/MapFilter.css';
 
 
 /**
- * Allows exporting a selected portion of the map to a variety of formats.
+ * Allows filtering the map content via QGIS Server WMS FILTER.
  *
- * You can set predefined filter expressions for a theme item as follows:
- *
- * ```json
- * predefinedFilters: {
- *     id: "<filter_id>",
- *     title: "<filter_title>",
- *     titlemsgid: "<filter_title_msgid>",
- *     filter: {
- *         "<layer>": <data_service_expression>
- *     },
- *     fields: {
- *         id: "<value_id>",
- *         title: "<value_title">,
- *         titlemsgid: "<value_title_msgid">",
- *         defaultValue: <default_value>,
- *         inputConfig: {<input_field_opts>}
- *     }
- * }
- * ```
- * You can set the startup filter configuration by specifying a `f` URL-parameter with a JSON-serialized string as follows:
- *
- * ```
- * f={"<filter_id>": {"<field_id>": <value>, ...}, ...}
- * ```
- *
- * To control the temporal filter, the filter ID is `__timefilter`, and the field IDs are `tmin` and `tmax`, with values an ISO date or datetime string (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`).
- *
- * Whenever an startup filter value is specified, the filter is automatically enabled.
- *
- * *Note*: When specifying `f`, you should also specify `t` as the startup filter configuraiton needs to match the filters of the desired theme.
+ * See [Map filtering](../../topics/MapFilter).
  */
 class MapFilter extends React.Component {
     static propTypes = {
+        /** Whether to allow custom filters. */
+        allowCustomFilters: PropTypes.bool,
+        /** Whether to allow filter by geometry. Requires the filter_geom plugin from qwc-qgis-server-plugins, and the filter will only be applied to postgis layers. */
+        allowFilterByGeom: PropTypes.bool,
+        /** Whether to display the temporal filter if temporal dimensions are found. */
         allowFilterByTime: PropTypes.bool,
         currentTask: PropTypes.string,
+        filter: PropTypes.object,
+        /** The style used for highlighting filter geometries. */
+        highlightStyle: PropTypes.shape({
+            /* Stroke color rgba array, i.e. [255, 0, 0, 0.5] */
+            strokeColor: PropTypes.array,
+            /* Stroke width */
+            strokeWidth: PropTypes.number,
+            /* Stroke dash/gap pattern array. Empty for solid line. */
+            strokeDash: PropTypes.array,
+            /* Fill color rgba array, i.e. [255, 0, 0, 0.33] */
+            fillColor: PropTypes.array
+        }),
         layers: PropTypes.array,
-        mapMargins: PropTypes.object,
         /** The position slot index of the map button, from the bottom (0: bottom slot). Set to -1 to hide the button. */
         position: PropTypes.number,
         setCurrentTask: PropTypes.func,
@@ -78,147 +81,366 @@ class MapFilter extends React.Component {
     };
     state = {
         filters: {},
-        timeFilter: null
+        geomFilter: {},
+        customFilters: {},
+        filterEditor: null,
+        filterInvalid: false
     };
+    constructor(props) {
+        super(props);
+        this.applyFilterTimeout = null;
+    }
+    componentDidMount() {
+        registerPermalinkDataStoreHook("mapfilter", this.serializeMapFilter);
+    }
+    componentWillUnmount() {
+        unregisterPermalinkDataStoreHook("mapfilter");
+    }
     componentDidUpdate(prevProps, prevState) {
         if (this.props.theme !== prevProps.theme) {
             // Initialize filter state
-            const filters = (this.props.theme.predefinedFilters || []).reduce((res, filterConfig) => ({
-                ...res,
-                [filterConfig.id]: {
-                    active: false,
-                    filter: filterConfig.filter,
-                    values: filterConfig.fields.reduce((values, valueConfig) => ({
-                        ...values,
-                        [valueConfig.id]: valueConfig.defaultValue
-                    }), {})
-                }
-            }), {});
-            if (this.props.layers !== prevProps.layers) {
-                const timeFilter = {};
-                this.props.layers.forEach(layer => this.buildTimeFilter(layer, timeFilter));
-                if (!isEmpty(timeFilter) && this.props.allowFilterByTime) {
-                    filters.__timefilter = {
-                        active: false,
-                        filter: timeFilter,
-                        values: {tstart: "", tend: ""},
-                        defaultValues: {tstart: '1800-01-01', tend: '9999-12-31'}
-                    };
-                }
-            }
+            const predefinedFilters = this.collectPredefinedFilters(this.props.layers);
+            const filters = this.initializeFilters(predefinedFilters, {});
+
+            let geomFilter = {};
+            let customFilters = {};
             if (!prevProps.theme && this.props.startupParams?.f) {
                 try {
                     const startupConfig = JSON.parse(this.props.startupParams.f);
                     Object.entries(startupConfig).forEach(([filterId, values]) => {
-                        filters[filterId].active = true;
-                        Object.entries(values).forEach(([fieldId, value]) => {
-                            filters[filterId].values[fieldId] = value;
-                        });
+                        if (filterId in filters) {
+                            filters[filterId].active = true;
+                            Object.entries(values).forEach(([fieldId, value]) => {
+                                filters[filterId].values[fieldId] = value;
+                            });
+                        }
                     });
-                } catch (e) {
-                    // Pass
+                    if ("__geomfilter" in startupConfig) {
+                        geomFilter = {
+                            geomType: "Polygon",
+                            geom: {type: "Polygon", coordinates: startupConfig.__geomfilter}
+                        };
+                    }
+                    if ("__custom" in startupConfig) {
+                        customFilters = startupConfig.__custom.reduce((res, entry) => ({...res, [uuidv4()]: {
+                            title: entry.title || "", layer: entry.layer, expr: JSON.stringify(entry.expr), active: true
+                        }}), {});
+                    }
+                } catch {
+                    /* eslint-disable-next-line */
+                    console.log("Error while parsing startup filter")
                 }
             }
-            this.setState({filters: filters});
+            this.setState({filters, geomFilter, customFilters});
         } else if (this.props.layers !== prevProps.layers) {
+            const predefinedFilters = this.collectPredefinedFilters(this.props.layers);
+            const prevPredefinedFilters = this.collectPredefinedFilters(prevProps.layers);
+            if (!isEqual(Object.keys(predefinedFilters).sort(), Object.keys(prevPredefinedFilters).sort())) {
+                this.setState(state => ({filters: this.initializeFilters(predefinedFilters, state.filters)}));
+            }
+        }
+        if (this.state.filters !== prevState.filters || this.state.customFilters !== prevState.customFilters || this.state.geomFilter.geom !== prevState.geomFilter.geom) {
+            clearTimeout(this.applyFilterTimeout);
+            this.applyFilterTimeout = setTimeout(this.applyFilter, 500);
+        }
+    }
+    collectPredefinedFilters = (layers) => {
+        const filters = layers.reduce((res, layer) => (
+            {...res, ...(layer.predefinedFilters || []).reduce((res2, config) => (
+                {...res2, [config.id]: {
+                    ...config,
+                    filter: Object.fromEntries(
+                        Object.entries(config.filter).map(([layername, filter]) => ([
+                            layer.wms_name + "#" + layername, filter
+                        ]))
+                    )
+                }}
+            ), {})}
+        ), {});
+        if (this.props.allowFilterByTime) {
             const timeFilter = {};
-            this.props.layers.forEach(layer => this.buildTimeFilter(layer, timeFilter));
-            if (!isEmpty(timeFilter) && this.props.allowFilterByTime) {
-                const newFilters = {...this.state.filters};
-                newFilters.__timefilter = {
-                    active: newFilters.__timefilter?.active ?? false,
+            layers.forEach(layer => this.buildTimeFilter(layer, timeFilter, layer.wms_name));
+            if (!isEmpty(timeFilter)) {
+                filters.__timefilter = {
+                    id: "__timefilter",
+                    active: false,
                     filter: timeFilter,
-                    values: newFilters.__timefilter?.values ?? {tstart: "", tend: ""},
-                    defaultValues: {tstart: '0000-01-01', tend: '9999-12-31'}
+                    title: LocaleUtils.tr("mapfilter.timefilter"),
+                    fields: [
+                        {id: "tstart", defaultValue: "", inputConfig: {type: "datetime"}, title: LocaleUtils.tr("mapfilter.timefrom")},
+                        {id: "tend", defaultValue: "", inputConfig: {type: "datetime"}, title: LocaleUtils.tr("mapfilter.timeto")}
+                    ],
+                    defaultValues: {tstart: '1800-01-01', tend: '9999-12-31'}
                 };
             }
         }
-        if (this.state.filters !== prevState.filters) {
-            const layerExpressions = {};
-            // Recompute filter expressions
-            Object.values(this.state.filters).forEach(entry => {
-                if (entry.active) {
-                    Object.entries(entry.filter).forEach(([layer, expression]) => {
-                        const replacedExpr = this.replaceExpressionVariables(expression, entry.values, entry.defaultValues || {});
-                        if (replacedExpr === null) {
-                            console.warn("Invalid filter expression: " + JSON.stringify(expression));
-                        } else if (layerExpressions[layer]) {
-                            layerExpressions[layer].push('and', replacedExpr);
-                        } else {
-                            layerExpressions[layer] = [replacedExpr];
-                        }
-                    });
+        return filters;
+    };
+    initializeFilters = (predefinedFilters, prevFilters) => {
+        clearTimeout(this.applyFilterTimeout);
+        this.applyFilterTimeout = null;
+
+        return Object.values(predefinedFilters).reduce((res, filterConfig) => ({
+            ...res,
+            [filterConfig.id]: prevFilters?.[filterConfig.id] ?? {
+                active: false,
+                filter: filterConfig.filter,
+                values: filterConfig.fields.reduce((values, valueConfig) => ({
+                    ...values,
+                    [valueConfig.id]: valueConfig.defaultValue
+                }), {}),
+                defaultValues: filterConfig.defaultValues
+            }
+        }), {});
+    };
+    applyFilter = () => {
+        this.applyFilterTimeout = null;
+        const layerExpressions = {};
+        // Recompute filter expressions
+        Object.values(this.state.filters).forEach(entry => {
+            if (entry.active) {
+                Object.entries(entry.filter).forEach(([layer, expression]) => {
+                    const replacedExpr = DataServiceExprUtils.replaceExpressionVariables(expression, entry.values, entry.defaultValues || {});
+                    if (replacedExpr === null) {
+                        /* eslint-disable-next-line */
+                        console.warn("Invalid filter expression: " + JSON.stringify(expression));
+                    } else {
+                        layerExpressions[layer] = DataServiceExprUtils.joinExpressions(layerExpressions[layer], replacedExpr);
+                    }
+                });
+            }
+        }, {});
+        Object.values(this.state.customFilters).forEach(entry => {
+            if (entry.active && entry.layer) {
+                let expr = '';
+                try {
+                    expr = JSON.parse(entry.expr);
+                } catch {
+                    return;
+                }
+                layerExpressions[entry.layer] = DataServiceExprUtils.joinExpressions(layerExpressions[entry.layer], expr);
+            }
+        });
+        const timeRange = this.state.filters.__timefilter?.active ? {
+            tstart: this.state.filters.__timefilter.values.tstart,
+            tend: this.state.filters.__timefilter.values.tend
+        } : null;
+        this.props.setFilter(layerExpressions, this.state.geomFilter.geom, timeRange);
+        // Validate parameters with test request
+        const themeLayer = this.props.layers.find(layer => layer.role === LayerRole.THEME);
+        if (themeLayer) {
+            const wmsParams = LayerUtils.buildWMSLayerParams(themeLayer, {filterParams: layerExpressions, filterGeom: this.state.geomFilter.geom}).params;
+            const wmsLayers = wmsParams.LAYERS.split(",");
+            const reqParams = {
+                SERVICE: 'WMS',
+                REQUEST: 'GetMap',
+                VERSION: '1.3.0',
+                CRS: 'EPSG:4326',
+                WIDTH: 10,
+                HEIGHT: 10,
+                BBOX: "-0.5,-0.5,0.5,0.5",
+                LAYERS: Object.keys(layerExpressions).filter(layer => wmsLayers.includes(layer)).join(","),
+                csrf_token: MiscUtils.getCsrfToken()
+            };
+            if (wmsParams.FILTER) {
+                reqParams.FILTER = wmsParams.FILTER;
+            }
+            if (wmsParams.FILTER_GEOM) {
+                reqParams.FILTER_GEOM = wmsParams.FILTER_GEOM;
+            }
+            const options = {
+                headers: {'content-type': 'application/x-www-form-urlencoded'},
+                responseType: "blob"
+            };
+            axios.post(themeLayer.url, new URLSearchParams(reqParams).toString(), options).then(() => {
+                this.setState({filterInvalid: false});
+            }).catch(() => {
+                this.setState({filterInvalid: true});
+            });
+        }
+    };
+    serializeMapFilter = () => {
+        return new Promise((resolve) => {
+            const permalinkState = Object.entries(this.state.filters).reduce((res, [key, value]) => {
+                if (value.active) {
+                    return {...res, [key]: value.values};
+                } else {
+                    return res;
                 }
             }, {});
-            this.props.setFilter(layerExpressions);
-        }
-    }
-    buildTimeFilter = (layer, filters) => {
+            if (this.state.geomFilter.geom) {
+                permalinkState.__geomfilter = this.state.geomFilter.geom.coordinates;
+            }
+            permalinkState.__custom = Object.values(this.state.customFilters).map(entry => {
+                if (!entry.active) {
+                    return null;
+                }
+                let expr = null;
+                try {
+                    expr = JSON.parse(entry.expr);
+                } catch {
+                    return null;
+                }
+                return {title: entry.title, layer: entry.layer, expr: expr};
+            }).filter(Boolean);
+            resolve({query: {f: JSON.stringify(permalinkState)}});
+        });
+    };
+    buildTimeFilter = (layer, filters, wmsName) => {
         if (layer.sublayers) {
-            layer.sublayers.forEach(sublayer => this.buildTimeFilter(sublayer, filters));
+            layer.sublayers.forEach(sublayer => this.buildTimeFilter(sublayer, filters, wmsName));
         } else {
             const timeDimension = (layer.dimensions || []).find(dimension => dimension.units === "ISO8601");
             if (timeDimension) {
-                filters[layer.name] = [
-                    [[timeDimension.fieldName, '>=', "'$tstart$'"], 'or', [timeDimension.fieldName, 'IS', 'NULL']],
+                filters[wmsName + "#" + layer.name] = [
+                    [[timeDimension.fieldName, '>=', "$tstart$"], 'or', [timeDimension.fieldName, 'IS', null]],
                     'and',
-                    [[timeDimension.endFieldName, '<=', "'$tend$'"], 'or', [timeDimension.endFieldName, 'IS', "NULL"]]
+                    [[timeDimension.endFieldName, '<=', "$tend$"], 'or', [timeDimension.endFieldName, 'IS', null]]
                 ];
             }
         }
     };
     render() {
         let button = null;
+        const taskActive = this.props.currentTask === "MapFilter";
         if (this.props.position >= 0) {
-            const right = this.props.mapMargins.right;
-            const bottom = this.props.mapMargins.bottom;
-            const style = {
-                right: 'calc(1.5em + ' + right + 'px)',
-                bottom: 'calc(' + bottom + 'px + ' + (5 + 4 * this.props.position) + 'em)'
-            };
-            const haveFilter = !isEmpty(this.props.layers.find(layer => layer.role === LayerRole.THEME)?.filterParams);
-            const classes = classNames({
-                "map-button": true,
-                "map-button-active": this.props.currentTask === "MapFilter",
-                "map-button-engaged": haveFilter
-            });
+            const filterActive = !isEmpty(this.props.filter.filterParams) || !!this.props.filter.filterGeom;
             const title = LocaleUtils.tr("appmenu.items.MapFilter");
+            const className = filterActive && this.state.filterInvalid ? "filter-map-button-error" : "";
             button = (
-                <button className={classes} key="MapFilterButton" onClick={this.buttonClicked}
-                    style={style} title={title}>
-                    <Icon icon="filter" />
-                </button>
+                <MapButton
+                    active={taskActive}
+                    className={className}
+                    engaged={filterActive && !this.state.filterInvalid}
+                    icon="filter"
+                    key="MapFilterButton" onClick={this.filterMapButtonClicked}
+                    position={this.props.position}
+                    tooltip={title} />
             );
         }
+        const selGeomType = this.state.geomFilter?.picking ? null : this.state.geomFilter?.geomType;
         return [
             button,
             (
-                <SideBar icon="filter" id="MapFilter" key="MapFilterSidebar" onShow={this.onShow} side={this.props.side}
-                    title="appmenu.items.MapFilter" width="20em">
+                <SideBar icon="filter" id="MapFilter" key="MapFilterSidebar" onHide={this.onSidebarHide} side={this.props.side}
+                    title={LocaleUtils.tr("appmenu.items.MapFilter")} width="20em">
                     {() => ({
                         body: this.renderBody()
                     })}
                 </SideBar>
-            )
+            ),
+            this.state.geomFilter.picking ? (
+                <PickFeature
+                    featureFilter={feature => ["Polygon", "LineString"].find(type => (feature?.geometry?.type || "").includes(type))}
+                    featurePicked={this.filterGeomPicked}
+                    highlightStyle={{...defaultHighlightStyle(), ...this.props.highlightStyle}}
+                    key="FeaturePicker" />
+            ) : null,
+            <MapSelection
+                active={taskActive && !!selGeomType}
+                geomType={selGeomType}
+                geometry={this.state.geomFilter?.geom}
+                geometryChanged={this.setFilterGeometry}
+                hideGeometry={this.state.geomFilter?.hideFilterGeom}
+                key="MapSelection"
+                styleOptions={this.props.highlightStyle} />
         ];
     }
-    buttonClicked = () => {
+    filterMapButtonClicked = () => {
         const mapClickAction = ConfigUtils.getPluginConfig("MapFilter").mapClickAction;
         this.props.setCurrentTask(this.props.currentTask === "MapFilter" ? null : "MapFilter", null, mapClickAction);
     };
+    onSidebarHide = () => {
+        this.setState(state => {
+            const newState = {...state};
+            if (!state.geomFilter.geom && state.geomFilter.geomType) {
+                newState.geomFilter.geomType = null;
+            }
+            if (state.geomFilter.picking) {
+                newState.geomFilter.picking = false;
+            }
+            return newState;
+        });
+    };
     renderBody = () => {
-        return [
-            ...this.renderPredefinedFilters(),
-            this.renderTimeFilter()
+        if (this.state.filterEditor) {
+            return this.renderFilterEditor();
+        } else {
+            return [
+                this.renderInvalidWarning(),
+                ...this.renderPredefinedFilters(),
+                this.props.allowFilterByGeom ? this.renderGeomFilter() : null,
+                ...this.renderCustomFilters()
+            ];
+        }
+    };
+    renderInvalidWarning = () => {
+        if (this.state.filterInvalid) {
+            return (
+                <div className="map-filter-invalid-warning" key="InvalidFilterWarning">
+                    <Icon icon="warning" /> <div>{LocaleUtils.tr("mapfilter.brokenrendering")}</div>
+                </div>
+            );
+        }
+        return null;
+    };
+    renderFilterEditor = () => {
+        const commitButtons = [
+            {key: 'Save', icon: 'ok', label: LocaleUtils.tr("common.save"), extraClasses: "button-accept"},
+            {key: 'Cancel', icon: 'remove', label: LocaleUtils.tr("common.cancel"), extraClasses: "button-reject"}
         ];
+        const sampleFilters = '["field", "=", "val"]\n' +
+                              '[["field", ">", "val1"], "and", ["field", "<", "val2"]]';
+        return (
+            <div className="map-filter-editor-container">
+                <TextInput
+                    className={"map-filter-editor " + (this.state.filterEditor.invalid ? "map-filter-editor-invalid" : "")} multiline
+                    onChange={value => this.setState(state => ({filterEditor: {...state.filterEditor, value, invalid: false}}))}
+                    placeholder={sampleFilters} value={this.state.filterEditor.value} />
+                {this.state.filterEditor.invalid ? (
+                    <div>
+                        <Icon icon="warning" /> <span>{LocaleUtils.tr("mapfilter.invalidfilter")}</span>
+                    </div>
+                ) : null}
+                <ButtonBar buttons={commitButtons} onClick={this.commitFilterEditor}/>
+            </div>
+        );
+    };
+    commitFilterEditor = (action) => {
+        if (action === 'Save') {
+            // Validate expression
+            const validateExpression = (values) => {
+                if (Array.isArray(values[0])) {
+                    // Even entries must be arrays, odd entries must be 'and' or 'or'
+                    return values.every((value, idx) => {
+                        return idx % 2 === 0 ? (Array.isArray(value) && validateExpression(value)) : ["and", "or"].includes(value.toLowerCase());
+                    }, true);
+                } else {
+                    return values.length === 3 && typeof values[0] === 'string' && typeof values[1] === 'string' && ['string', 'number'].includes(typeof values[2]);
+                }
+            };
+            let filterexpr = null;
+            try {
+                filterexpr = JSON.parse(this.state.filterEditor.value);
+            } catch {
+                // Pass
+            }
+            if (!Array.isArray(filterexpr) || !validateExpression(filterexpr)) {
+                this.setState(state => ({filterEditor: {...state.filterEditor, invalid: true}}));
+                return;
+            }
+            this.updateCustomFilter(this.state.filterEditor.filterId, 'expr', this.state.filterEditor.value);
+        }
+        this.setState({filterEditor: null});
     };
     renderPredefinedFilters = () => {
-        return (this.props.theme.predefinedFilters || []).map(config => (
+        const predefinedFilters = this.collectPredefinedFilters(this.props.layers);
+        return Object.values(predefinedFilters).filter(filter => filter.id in this.state.filters).map(config => (
             <div className="map-filter-entry" key={config.id}>
-                <div className="map-filter-entry-title">
-                    <span>{config.title || LocaleUtils.tr(config.titlemsgid)}</span>
+                <div className="map-filter-entry-titlebar">
+                    <span className="map-filter-entry-title">{config.title ?? LocaleUtils.tr(config.titlemsgid)}</span>
                     <ToggleSwitch
-                        active={this.state.filters[config.id]?.active}
+                        active={this.state.filters[config.id].active}
                         onChange={(active) => this.toggleFilter(config.id, active)} />
                 </div>
                 <div className="map-filter-entry-body">
@@ -226,14 +448,9 @@ class MapFilter extends React.Component {
                         <tbody>
                             {config.fields.map(field => (
                                 <tr key={field.id}>
-                                    <td>{field.title || LocaleUtils.tr(field.titlemsgid)}: </td>
+                                    <td>{field.title ?? LocaleUtils.tr(field.titlemsgid)}: </td>
                                     <td>
-                                        <input
-                                            disabled={!this.state.filters[config.id]?.active}
-                                            onChange={ev => this.updateFieldValue(config.id, field.id, ev.target.value)}
-                                            type="text"
-                                            value={this.state.filters[config.id].values[field.id]}
-                                            {...field.inputConfig} />
+                                        {this.renderFilterField(config.id, field)}
                                     </td>
                                 </tr>
                             ))}
@@ -243,35 +460,120 @@ class MapFilter extends React.Component {
             </div>
         ));
     };
-    renderTimeFilter = () => {
-        const timeFilter = this.state.filters.__timefilter;
-        if (!timeFilter) {
-            return null;
+    renderFilterField = (configid, field) => {
+        if (field.inputConfig.type === 'select') {
+            return (
+                <select
+                    onChange={ev => this.updateFieldValue(configid, field.id, ev.target.value)}
+                    value={this.state.filters[configid].values[field.id]}
+                >
+                    {!field.defaultValue ? (
+                        <option value="">{LocaleUtils.tr("common.select")}</option>
+                    ) : null}
+                    {field.inputConfig.options.map(entry => (
+                        <option key={entry.value ?? entry} value={entry.value ?? entry}>{entry.label ?? (entry.labelmsgid ? LocaleUtils.tr(entry.labelmsgid) : entry)}</option>
+                    ))}
+                </select>
+            );
+        } else if (field.inputConfig.type === "datetime") {
+            return (
+                <DateTimeInput onChange={value => this.updateFieldValue(configid, field.id, value)} value={this.state.filters[configid].values[field.id] || ""} />
+            );
+        } else {
+            return (
+                <input
+                    onChange={ev => this.updateFieldValue(configid, field.id, ev.target.value)}
+                    type="text"
+                    value={this.state.filters[configid].values[field.id] || ""}
+                    {...field.inputConfig} />
+            );
         }
-        return (
-            <div className="map-filter-entry" key={"__timefilter"}>
-                <div className="map-filter-entry-title">
-                    <span>{LocaleUtils.tr("mapfilter.timefilter")}</span>
+    };
+    renderCustomFilters = () => {
+        if (!this.props.allowCustomFilters) {
+            return [];
+        }
+        const layerNames = this.props.layers.reduce((res, layer) => {
+            if (layer.role === LayerRole.THEME) {
+                const sublayers = LayerUtils.getSublayerNames(layer, true, lyr => !!lyr.geometryType);
+                return {...res, ...Object.fromEntries(sublayers.map(layername => ([layer.wms_name + "#" + layername, layername])))};
+            }
+            return res;
+        }, {});
+        const customFilters = Object.entries(this.state.customFilters).map(([key, entry]) => (
+            <div className="map-filter-entry" key={key}>
+                <div className="map-filter-entry-titlebar map-filter-custom-entry-titlebar">
+                    <TextInput  className="map-filter-entry-title" onChange={value => this.updateCustomFilter(key, 'title', value)} value={entry.title} />
                     <ToggleSwitch
-                        active={timeFilter.active}
-                        onChange={(active) => this.toggleFilter("__timefilter", active)} />
+                        active={entry.active}
+                        onChange={(active) => this.updateCustomFilter(key, 'active',  active)} />
+                    <Icon icon="trash" onClick={() => this.deleteCustomFilter(key)} />
                 </div>
                 <div className="map-filter-entry-body">
                     <table className="map-filter-entry-fields">
                         <tbody>
                             <tr>
-                                <td>{LocaleUtils.tr("mapfilter.timefrom")}: </td>
-                                <td><DateTimeInput onChange={value => this.updateFieldValue("__timefilter", "tstart", value)} value={timeFilter.values.tstart} /></td>
-                            </tr>
-                            <tr>
-                                <td>{LocaleUtils.tr("mapfilter.timeto")}: </td>
-                                <td><DateTimeInput onChange={value => this.updateFieldValue("__timefilter", "tend", value)} value={timeFilter.values.tend} /></td>
+                                <td>
+                                    <ComboBox onChange={value => this.updateCustomFilter(key, 'layer', value)} placeholder={LocaleUtils.tr("common.selectlayer")} value={entry.layer}>
+                                        {Object.entries(layerNames).map(([layerid, layername]) => (<div key={layerid} value={layerid}>{layername}</div>))}
+                                    </ComboBox>
+                                </td>
+                                <td>
+                                    <input className="map-filter-custom-entry-expr" onChange={() => {}} onClick={() => this.setState({filterEditor: {filterId: key, value: entry.expr}})} readOnly value={entry.expr} />
+                                </td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </div>
+        ));
+        return [
+            ...customFilters,
+            (
+                <div className="map-filter-add-custom" key="addcustomfilter">
+                    <button className="button" onClick={this.addCustomFilter} type="button">{LocaleUtils.tr("mapfilter.addcustomfilter")}</button>
+                </div>
+            )
+        ];
+    };
+    renderGeomFilter = () => {
+        const geomFilter = this.state.geomFilter;
+        const filterButtons = [
+            {key: "LineString", tooltip: LocaleUtils.tr("common.line"), icon: "line", label: LocaleUtils.tr("common.line")},
+            {key: "Polygon", tooltip: LocaleUtils.tr("common.polygon"), icon: "polygon", label: LocaleUtils.tr("common.polygon")},
+            {key: "Circle", tooltip: LocaleUtils.tr("common.circle"), icon: "circle", label: LocaleUtils.tr("common.circle")},
+            {key: "Pick", tooltip: LocaleUtils.tr("common.pick"), icon: "pick", label: LocaleUtils.tr("common.pick")}
+        ];
+        const active = geomFilter.picking ? "Pick" : geomFilter.geomType || "";
+        return (
+            <div className="map-filter-entry" key={"__geomfilter"}>
+                <div className="map-filter-entry-titlebar">
+                    <span className="map-filter-entry-title">{LocaleUtils.tr("mapfilter.geomfilter")}</span>
+                </div>
+                <div className="map-filter-entry-body">
+                    <ButtonBar active={active} buttons={filterButtons} onClick={this.triggerGeometryFilter} />
+                    <div>
+                        <label><input checked={!!geomFilter.hideFilterGeom} onChange={this.toggleHideFilterGeom} type="checkbox" /> {LocaleUtils.tr("mapfilter.hidefiltergeom")}</label>
+                    </div>
+                </div>
+            </div>
         );
+    };
+    triggerGeometryFilter = (action) => {
+        if (action === 'Pick') {
+            this.setState((state) => ({geomFilter: {...state.geomFilter, geom: null, picking: !state.geomFilter.picking, geomType: null}}));
+        } else {
+            this.setState((state) => ({geomFilter: {...state.geomFilter, geom: null, picking: false, geomType: state.geomFilter.geomType === action ? null : action}}));
+        }
+    };
+    setFilterGeometry = (geom) => {
+        this.setState((state) => ({geomFilter: {...state.geomFilter, geom: geom}}));
+    };
+    filterGeomPicked = (layer, feature) => {
+        this.setState((state) => ({geomFilter: {...state.geomFilter, geom: feature.geometry, geomType: feature.geometry.type}}));
+    };
+    toggleHideFilterGeom = (ev) => {
+        this.setState((state) => ({geomFilter: {...state.geomFilter, hideFilterGeom: ev.target.checked}}));
     };
     toggleFilter = (filterId, active) => {
         this.setState((state) => ({
@@ -298,33 +600,45 @@ class MapFilter extends React.Component {
             }
         }));
     };
-    replaceExpressionVariables = (expr, values, defaultValues) => {
-        if (expr.length < 3 || (expr.length % 2) === 0 || typeof expr[1] !== 'string') {
-            // Invalid expression: array must have at least three and odd number of entries,
-            // mid entry must be a string (operator)
-            return null;
-        }
-        const op = expr[1].toLowerCase();
-        if (typeof expr[0] === 'string' && typeof expr[2] === 'string') {
-            const right = Object.entries(values).reduce((res, [key, value]) => res.replace(`$${key}$`, (value || defaultValues[key]) ?? value), expr[2]);
-            return [expr[0], op, right];
-        } else {
-            // Even indices must be arrays, odd and|or strings
-            const isAndOr = (entry) => ["and", "or"].includes(String(entry).toLowerCase());
-            const invalid = expr.find((entry, idx) => (idx % 2) === 0 ? !Array.isArray(entry) : !isAndOr(entry));
-            if (invalid) {
-                return null;
+    updateCustomFilter = (filterId, key, value) => {
+        this.setState((state) => ({
+            customFilters: {
+                ...state.customFilters,
+                [filterId]: {
+                    ...state.customFilters[filterId],
+                    [key]: value
+                }
             }
-            return expr.map((entry, idx) => (idx % 2) === 0 ? this.replaceExpressionVariables(entry, values, defaultValues) : entry);
-        }
+        }));
+    };
+    addCustomFilter = () => {
+        const key = uuidv4();
+        this.setState((state) => ({
+            customFilters: {
+                ...state.customFilters,
+                [key]: {
+                    active: false,
+                    title: '',
+                    layer: '',
+                    expr: ''
+                }
+            }
+        }));
+    };
+    deleteCustomFilter = (key) => {
+        this.setState((state) => {
+            const newCustomFilters = {...state.customFilters};
+            delete newCustomFilters[key];
+            return {customFilters: newCustomFilters};
+        });
     };
 }
 
 export default connect((state) => ({
     currentTask: state.task.id,
-    mapMargins: state.windows.mapMargins,
     theme: state.theme.current,
     layers: state.layers.flat,
+    filter: state.layers.filter,
     startupParams: state.localConfig.startupParams
 }), {
     setFilter: setFilter,

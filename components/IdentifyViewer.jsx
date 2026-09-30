@@ -1,321 +1,282 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
-import React from 'react';
-import PropTypes from 'prop-types';
-import {connect} from 'react-redux';
-import isEmpty from 'lodash.isempty';
-import FileSaver from 'file-saver';
 import htmlReactParser, {domToReact} from 'html-react-parser';
-import clone from 'clone';
-import omit from 'lodash.omit';
-import JSZip from 'jszip';
-import {LayerRole, addLayerFeatures, removeLayer} from '../actions/layers';
+import React from 'react';
+import {connect} from 'react-redux';
+
+import axios from 'axios';
+import FileSaver from 'file-saver';
+import isEmpty from 'lodash.isempty';
+import mime from 'mime-to-extensions';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import {setActiveLayerInfo} from '../actions/layerinfo';
+import {LayerRole, addLayerFeatures, removeLayer, changeLayerProperty} from '../actions/layers';
 import {zoomToExtent} from '../actions/map';
-import {openExternalUrl} from '../actions/task';
+import {setCurrentTask} from '../actions/task';
+import {openExternalUrl} from '../actions/windows';
 import ConfigUtils from '../utils/ConfigUtils';
-import CoordinatesUtils from '../utils/CoordinatesUtils';
+import {defaultHighlightStyle} from '../utils/FeatureStyles';
+import {IdentifyExporters} from '../utils/IdentifyExporters';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
-import MiscUtils from '../utils/MiscUtils';
+import MapUtils from '../utils/MapUtils';
+import MiscUtils, {ToggleSet} from '../utils/MiscUtils';
 import VectorLayerUtils from '../utils/VectorLayerUtils';
 import Icon from './Icon';
+import ButtonBar from './widgets/ButtonBar';
+import FeaturesTable from './widgets/FeaturesTable';
+import NavBar from './widgets/NavBar';
+import Spinner from './widgets/Spinner';
+import ToggleSwitch from './widgets/ToggleSwitch';
+
 import './style/IdentifyViewer.css';
 
-
-const BuiltinExporters = [
-    {
-        id: 'json',
-        title: 'json',
-        allowClipboard: true,
-        export: (json, callback) => {
-            const data = JSON.stringify(json, null, ' ');
-            callback({
-                data: data, type: "text/plain;charset=utf-8", filename: "results.json"
-            });
-        }
-    }, {
-        id: 'geojson',
-        title: 'geojson',
-        allowClipboard: true,
-        export: (json, callback) => {
-            const featureCollection = {
-                type: "FeatureCollection",
-                features: Object.values(json).flat().map(entry => {
-                    const feature = omit(entry, ['featurereport', 'displayfield', 'layername', 'layertitle', 'layerinfo', 'attribnames', 'clickPos', 'displayname', 'bbox']);
-                    if (feature.geometry) {
-                        feature.crs = {
-                            type: "name",
-                            properties: {
-                                name: CoordinatesUtils.toOgcUrnCrs(entry.crs)
-                            }
-                        };
-                    }
-                    return feature;
-                })
-            };
-            const data = JSON.stringify(featureCollection, null, ' ');
-            callback({
-                data: data, type: "application/geo+json;charset=utf-8", filename: "results.json"
-            });
-        }
-    }, {
-        id: 'csv',
-        title: 'CSV',
-        allowClipboard: true,
-        export: (json, callback) => {
-            let data = "";
-            Object.entries(json).forEach(([layerName, features]) => {
-                features.forEach(feature => {
-                    data += layerName + ": " + feature.displayname + "\n";
-                    Object.entries(feature.properties || {}).forEach(([attrib, value]) => {
-                        if (attrib !== "htmlContent" && attrib !== "htmlContentInline") {
-                            data += '\t"' + attrib + '"\t"' + String(value).replace('"', '""') + '"\n';
-                        }
-                    });
-                    if (feature.geometry) {
-                        data += '\t"geometry"\t"' + VectorLayerUtils.geoJSONGeomToWkt(feature.geometry) + '"\n';
-                    }
-                });
-                data += "\n";
-            });
-            callback({
-                data: data, type: "text/plain;charset=utf-8", filename: "results.csv"
-            });
-        }
-    }, {
-        id: 'csvzip',
-        title: 'CSV+ZIP',
-        allowClipboard: false,
-        export: (json, callback) => {
-            let first = true;
-            const data = [];
-            const filenames = [];
-            Object.entries(json).forEach(([layerName, features]) => {
-                let csv = "";
-                if (first) {
-                    Object.entries(features[0].properties || {}).forEach(([attrib]) => {
-                        if (attrib !== "htmlContent" && attrib !== "htmlContentInline") {
-                            csv += attrib  + ';';
-                        }
-                    });
-                    if (features[0].geometry) {
-                        csv += 'geometry';
-                    } else if (csv !== "") {
-                        csv = csv.slice(0, -1); // Remove trailling semi column ;
-                    }
-                    first = false;
-                    csv += '\n';
-                }
-                features.forEach(feature => {
-                    Object.entries(feature.properties || {}).forEach(([attrib, value]) => {
-                        if (attrib !== "htmlContent" && attrib !== "htmlContentInline") {
-                            csv += String(value).replace('"', '""') + ';';
-                        }
-                    });
-                    if (feature.geometry) {
-                        csv += VectorLayerUtils.geoJSONGeomToWkt(feature.geometry);
-                    } else if (csv !== "") {
-                        csv = csv.slice(0, -1); // Remove trailling semi column ;
-                    }
-                    csv += '\n';
-                });
-                first = true;
-                data.push(csv);
-                filenames.push(layerName);
-            });
-            if (data.length > 1) {
-                const zip = new JSZip();
-                for (let i = 0; i < data.length; i++) {
-                    const blob = new Blob([data[i]], {type: "text/csv;charset=utf-8"});
-                    zip.file(filenames[i] + ".csv", blob);
-                }
-                zip.generateAsync({type: "arraybuffer"}).then((result) => {
-                    callback({
-                        data: result, type: "application/zip", filename: "results.zip"
-                    });
-                });
-            } else {
-                callback({
-                    data: data[0], type: "text/csv;charset=utf-8", filename: filenames[0] + ".csv"
-                });
-            }
-        }
-    }
-];
 
 class IdentifyViewer extends React.Component {
     static propTypes = {
         addLayerFeatures: PropTypes.func,
-        attributeCalculator: PropTypes.func,
-        attributeTransform: PropTypes.func,
+        changeLayerProperty: PropTypes.func,
         collapsible: PropTypes.bool,
-        customExporters: PropTypes.array,
-        displayResultTree: PropTypes.bool,
+        editConfigs: PropTypes.object,
+        enableAggregatedReports: PropTypes.bool,
+        enableCompare: PropTypes.bool,
         enableExport: PropTypes.oneOfType([PropTypes.bool, PropTypes.array]),
         exportGeometry: PropTypes.bool,
+        highlightAllResults: PropTypes.bool,
         identifyResults: PropTypes.object,
         iframeDialogsInitiallyDocked: PropTypes.bool,
         layers: PropTypes.array,
         longAttributesDisplay: PropTypes.oneOf(['ellipsis', 'wrap']),
-        mapcrs: PropTypes.string,
+        map: PropTypes.object,
+        openExternalUrl: PropTypes.func,
         removeLayer: PropTypes.func,
         replaceImageUrls: PropTypes.bool,
+        resultDisplayMode: PropTypes.string,
+        resultGridSize: PropTypes.number,
+        resultMultiDisplay: PropTypes.bool,
+        resultsChanged: PropTypes.func,
         setActiveLayerInfo: PropTypes.func,
-        openExternalUrl: PropTypes.func,
+        setCurrentTask: PropTypes.func,
+        showHighlight: PropTypes.bool,
+        showLayerSelector: PropTypes.bool,
         showLayerTitles: PropTypes.bool,
+        showZoomToResults: PropTypes.bool,
+        skipEmptyFeatureAttributes: PropTypes.bool,
         theme: PropTypes.object,
-        zoomToExtent: PropTypes.func,
-        highlightAllResults: PropTypes.bool
+        zoomToExtent: PropTypes.func
     };
     static defaultProps = {
         longAttributesDisplay: 'ellipsis',
-        customExporters: [],
-        displayResultTree: true,
-        attributeCalculator: (/* layer, feature */) => { return []; },
-        attributeTransform: (name, value /* , layer, feature */) => value,
+        enableAggregatedReports: true,
+        resultDisplayMode: 'flat',
+        resultGridSize: 200,
+        resultMultiDisplay: false,
         showLayerTitles: true,
+        showLayerSelector: true,
+        showHighlight: true,
         highlightAllResults: true
     };
     state = {
-        expanded: {},
-        expandedResults: {},
-        resultTree: {},
+        collapsedLayers: new ToggleSet(),
+        expandedResults: new ToggleSet(),
+        selectedResults: new ToggleSet(),
+        reports: {},
         currentResult: null,
-        currentLayer: null,
-        exportFormat: 'geojson'
+        settingsMenu: false,
+        exportFormat: 'geojson',
+        selectedAggregatedReport: "",
+        generatingReport: false,
+        selectedLayer: '',
+        compareEnabled: false,
+        multiViewEnabled: false,
+        currentPage: 0,
+        pageSize: 1,
+        tableSelection: {}
     };
     constructor(props) {
         super(props);
+        this.resultsTreeRef = null;
         this.currentResultElRef = null;
         this.scrollIntoView = false;
-        this.state.exportFormat = !Array.isArray(props.enableExport) || props.enableExport.includes('geojson') ? 'geojson' : props.enableExport[0];
+        this.bodyEl = null;
+        this.state.exportFormat = !Array.isArray(props.enableExport) ? 'geojson' : props.enableExport[0];
+        this.state.multiViewEnabled = props.resultMultiDisplay;
+        this.selectionLayerId = uuidv4();
+        this.highlightLayerId = uuidv4();
     }
     componentDidMount() {
-        this.updateResultTree();
+        this.onResultsUpdated({});
+        if (this.props.highlightAllResults && this.props.showHighlight) {
+            const results = this.state.selectedLayer !== '' ? {[this.state.selectedLayer]: this.props.identifyResults[this.state.selectedLayer]} : this.props.identifyResults;
+            const layer = {
+                id: this.selectionLayerId,
+                role: LayerRole.SELECTION
+            };
+            this.props.addLayerFeatures(layer, Object.values(results).flat(), true);
+        }
     }
     componentDidUpdate(prevProps, prevState) {
         if (this.props.identifyResults !== prevProps.identifyResults) {
-            this.updateResultTree();
+            this.onResultsUpdated(prevProps.identifyResults);
         }
 
-        if (prevState.currentResult !== this.state.currentResult || prevState.resultTree !== this.state.resultTree) {
-            this.setHighlightedResults(this.state.currentResult === null ? null : [this.state.currentResult], this.state.resultTree);
-        }
         // Scroll to selected result
         if (this.state.currentResult && this.state.currentResult !== prevState.currentResult &&
-        this.currentResultElRef && this.scrollIntoView) {
-            this.currentResultElRef.parentNode.scrollTop = this.currentResultElRef.offsetTop - this.currentResultElRef.parentNode.offsetTop;
+        this.resultsTreeRef && this.currentResultElRef && this.scrollIntoView) {
+            this.resultsTreeRef.scrollTop = this.currentResultElRef.offsetTop - 10;
             this.scrollIntoView = false;
             this.currentResultElRef = null;
         }
+        // Ensure currentPage is in range
+        if (this.props.identifyResults !== prevProps.identifyResults || this.state.selectedLayer !== prevState.selectedLayer) {
+            const results = this.state.selectedLayer !== '' ? {[this.state.selectedLayer]: this.props.identifyResults[this.state.selectedLayer]} : this.props.identifyResults;
+            const count = Object.values(results).flat().length;
+            this.setState(state => ({currentPage: Math.max(0, Math.min(state.currentPage, count - 1))}));
+        }
+        // Highlight features
+        if (this.props.identifyResults !== prevProps.identifyResults || this.state.selectedLayer !== prevState.selectedLayer || this.props.showHighlight !== prevProps.showHighlight) {
+            if (!this.props.showHighlight) {
+                this.props.removeLayer(this.selectionLayerId);
+            } else if (this.props.highlightAllResults && this.props.showHighlight) {
+                const results = this.state.selectedLayer !== '' ? {[this.state.selectedLayer]: this.props.identifyResults[this.state.selectedLayer]} : this.props.identifyResults;
+                const layer = {
+                    id: this.selectionLayerId,
+                    role: LayerRole.SELECTION
+                };
+                this.props.addLayerFeatures(layer, Object.values(results).flat(), true);
+            }
+        }
+        // Update current result highlighting
+        if (this.state.currentResult !== prevState.currentResult || this.props.showHighlight !== prevProps.showHighlight) {
+            this.setHighlightedFeatures(null);
+        }
+        // Update page size when toggling multi-view
+        if (this.state.multiViewEnabled !== prevState.multiViewEnabled) {
+            this.computePageSize(this.bodyEl.getBoundingClientRect());
+        }
     }
     componentWillUnmount() {
-        this.props.removeLayer("identifyslection");
+        this.props.removeLayer(this.selectionLayerId);
+        this.props.removeLayer(this.highlightLayerId);
     }
-    updateResultTree = () => {
-        const layers = Object.keys(this.props.identifyResults);
-        let currentResult = null;
-        let currentLayer = null;
-        if (layers.length === 1 && this.props.identifyResults[layers[0]].length === 1) {
-            currentResult = this.props.identifyResults[layers[0]][0];
-            currentLayer = layers[0];
-        }
-        this.setState({
-            resultTree: clone(this.props.identifyResults),
-            currentResult: currentResult,
-            currentLayer: currentLayer
-        });
+    getCurrentResultFeature = () => {
+        return this.props.identifyResults[this.state.currentResult?.layerid]?.find?.(feature => feature.id === this.state.currentResult.featureid) ?? null;
     };
-    setHighlightedResults = (results, resultTree) => {
-        if (!results && this.props.highlightAllResults) {
-            results = Object.keys(resultTree).reduce((res, layer) => {
-                return res.concat(resultTree[layer].map(result => ({...result, id: layer + "." + result.id})));
-            }, []);
-        }
-        results = (results || []).filter(result => result.type.toLowerCase() === "feature");
-        if (!isEmpty(results)) {
-            const layer = {
-                id: "identifyslection",
-                role: LayerRole.SELECTION
-            };
-            this.props.addLayerFeatures(layer, results, true);
-        } else {
-            this.props.removeLayer("identifyslection");
-        }
-    };
-    getExpandedClass = (path, deflt) => {
-        const expanded = this.state.expanded[path] !== undefined ? this.state.expanded[path] : deflt;
-        return expanded ? "identify-layer-expandable identify-layer-expanded" : "identify-layer-expandable";
-    };
-    toggleExpanded = (path, deflt) => {
-        const newstate = this.state.expanded[path] !== undefined ? !this.state.expanded[path] : !deflt;
-        const diff = {};
-        diff[path] = newstate;
-        if (this.state.currentLayer === path && !newstate) {
-            this.setState((state) => ({...state, expanded: {...state.expanded, ...diff}, currentResult: null, currentLayer: null}));
-        } else {
-            this.setState((state) => ({...state, expanded: {...state.expanded, ...diff}}));
-        }
-    };
-    setCurrentResult = (layer, result) => {
-        if (this.state.currentResult === result) {
-            this.setState({currentResult: null, currentLayer: null});
-        } else {
-            this.setState({currentResult: result, currentLayer: layer});
-            this.scrollIntoView = true;
-        }
-    };
-    removeResultLayer = (layer) => {
-        this.setState((state) => {
-            const newResultTree = {...state.resultTree};
-            delete newResultTree[layer];
-            this.setState({
-                resultTree: newResultTree,
-                currentResult: state.currentLayer === layer ? null : state.currentResult,
-                currentLayer: state.currentLayer === layer ? null : state.currentLayer
-            });
-        });
-    };
-    removeResult = (layer, result) => {
-        this.setState((state) => {
-            const newResultTree = {...state.resultTree};
-            newResultTree[layer] = state.resultTree[layer].filter(item => item !== result);
-            if (isEmpty(newResultTree[layer])) {
-                delete newResultTree[layer];
+    onResultsUpdated = (prevResults) => {
+        this.setState(state => {
+            const prevLayers = new Set(Object.keys(prevResults));
+            const layers = new Set(Object.keys(this.props.identifyResults));
+            const resultIds = new Set(Object.entries(this.props.identifyResults).map(([layerid, features]) => {
+                return features.map(f => `${layerid}${f.id}`);
+            }).flat());
+            let currentResult = state.currentResult;
+            if (this.props.resultDisplayMode === "tree") {
+                // Set current result if only one result available
+                if (layers.size === 1 && this.props.identifyResults[[...layers][0]].length === 1) {
+                    currentResult = {
+                        layerid: [...layers][0],
+                        featureid: this.props.identifyResults[[...layers][0]][0].id
+                    };
+                } else if (!this.props.identifyResults[currentResult?.layerid]?.find?.(f => f.id === currentResult.featureid)) {
+                    currentResult = null;
+                }
             }
-            return {
-                resultTree: newResultTree,
-                currentResult: state.currentResult === result ? null : state.currentResult
-            };
+            // If identified layers change, recollect the feature reports. There might be a new layer which has since been added
+            let reports = state.reports;
+            if (prevLayers.size !== layers.size || !([...layers].every(x => prevLayers.has(x)))) {
+                reports = LayerUtils.collectFeatureReports(this.props.layers);
+            }
+            // Adjust state for removed layers/features
+            let selectedLayer = state.selectedLayer;
+            if (!(selectedLayer in this.props.identifyResults)) {
+                selectedLayer = '';
+            }
+            const selectedResults = state.selectedResults.filtered(x => resultIds.has(x));
+            const expandedResults = state.expandedResults.filtered(x => resultIds.has(x));
+            const collapsedLayers = state.collapsedLayers.filtered(x => layers.has(x));
+            return {currentResult, reports, selectedLayer, selectedResults, expandedResults, collapsedLayers};
         });
+    };
+    setHighlightedFeatures = (features) => {
+        if (!this.props.showHighlight) {
+            this.props.removeLayer(this.highlightLayerId);
+            return;
+        }
+        if (isEmpty(features)) {
+            if (!isEmpty(this.state.tableSelection)) {
+                features = Object.values(this.state.tableSelection).map(sel => Object.values(sel)).flat();
+            } else if (this.state.currentResult) {
+                features = [this.getCurrentResultFeature()];
+            }
+        }
+        if (!isEmpty(features)) {
+            features = features.filter(f => f.geometry).map(f => ({id: f.id, geometry: f.geometry}));
+            const layer = {
+                id: this.highlightLayerId,
+                role: LayerRole.SELECTION,
+                styleOptions: defaultHighlightStyle()
+            };
+            this.props.addLayerFeatures(layer, features, true);
+        } else {
+            this.props.removeLayer(this.highlightLayerId);
+        }
+    };
+    removeResultLayer = (layerid) => {
+        const newResults = {...this.props.identifyResults};
+        delete newResults[layerid];
+        this.props.resultsChanged(newResults);
+    };
+    removeResult = (layerid, feature) => {
+        const newResults = {...this.props.identifyResults};
+        newResults[layerid] = newResults[layerid].filter(item => item !== feature);
+        if (isEmpty(newResults[layerid])) {
+            delete newResults[layerid];
+        }
+        this.props.resultsChanged(newResults);
     };
     exportResults = (clipboard = false) => {
         const filteredResults = {};
-        Object.keys(this.state.resultTree).map(key => {
-            if (!isEmpty(this.state.resultTree[key])) {
-                filteredResults[key] = this.state.resultTree[key];
-            }
-        });
+        if (this.state.selectedResults.size() > 0) {
+            this.state.selectedResults.entries().forEach(key => {
+                const [layerid, featureid] = key.split("$");
+                if (!filteredResults[layerid]) {
+                    filteredResults[layerid] = [];
+                }
+                filteredResults[layerid].push(this.props.identifyResults[layerid].find(feature => feature.id === featureid));
+            });
+        } else {
+            const results = this.state.selectedLayer !== '' ? {[this.state.selectedLayer]: this.props.identifyResults[this.state.selectedLayer]} : this.props.identifyResults;
+            Object.keys(results).map(layerid => {
+                if (isEmpty(results[layerid])) {
+                    return;
+                } else if (!isEmpty(this.state.tableSelection[layerid])) {
+                    filteredResults[layerid] = Object.values(this.state.tableSelection[layerid]);
+                } else {
+                    filteredResults[layerid] = results[layerid];
+                }
+            });
+        }
         this.export(filteredResults, clipboard);
     };
     exportResultLayer = (layer) => {
-        this.export({[layer]: this.state.resultTree[layer]});
+        this.export({[layer]: this.props.identifyResults[layer]});
     };
     exportResult = (layer, result) => {
         this.export({[layer]: [result]});
     };
     export = (json, clipboard = false) => {
-        const exporter = [...BuiltinExporters, ...this.props.customExporters].find(entry => entry.id === this.state.exportFormat);
+        const exporter = this.getExporters().find(entry => entry.id === this.state.exportFormat);
         if (exporter) {
             if (!this.props.exportGeometry) {
                 json = Object.entries(json).reduce((res, [layerId, features]) => (
-                    {...res, [layerId]: features.map(feature => omit(feature, ['geometry']))}
+                    {...res, [layerId]: features.map(feature => MiscUtils.objectOmit(feature, ['geometry']))}
                 ), {});
             }
             exporter.export(json, (result) => {
@@ -327,109 +288,137 @@ class IdentifyViewer extends React.Component {
             });
         }
     };
-    renderLayer = (layer) => {
-        const results = this.state.resultTree[layer];
-        if (results.length === 0) {
-            return null;
+    renderResultTree = () => {
+        const exportEnabled = this.props.enableExport === true || !isEmpty(this.props.enableExport);
+        return (<div className="identify-results-tree" key="results-container" ref={el => { this.resultsTreeRef = el; }} style={{maxHeight: this.state.currentResult ? '10em' : 'initial'}}>
+            {Object.entries(this.props.identifyResults).map(([layerid, features]) => {
+                if (features.length === 0) {
+                    return null;
+                }
+                return (
+                    <div key={layerid}>
+                        <div className="identify-results-tree-entry"
+                            onMouseEnter={() => this.setHighlightedFeatures(features)}
+                            onMouseLeave={() => this.setHighlightedFeatures(null)}
+                        >
+                            <span onClick={() => this.toggleExpanded(layerid)}>
+                                <Icon icon={this.state.collapsedLayers.has(layerid) ? "expand" : "collapse"} /> {features[0].layertitle}
+                            </span>
+                            {exportEnabled ? (<Icon className="identify-export-result" icon="export" onClick={() => this.exportResultLayer(layerid)} />) : null}
+                            <Icon className="identify-remove-result" icon="trash" onClick={() => this.removeResultLayer(layerid)} />
+                        </div>
+                        {this.state.collapsedLayers.has(layerid) ? null : (
+                            <div className="identify-results-tree-entries">
+                                {features.map(feature => {
+                                    // this.renderResult(layername, result)
+                                    const ref = this.state.currentResult === feature && this.scrollIntoView ? el => { this.currentResultElRef = el; } : null;
+                                    const active = this.state.currentResult?.featureid === feature.id && this.state.currentResult?.layerid === layerid;
+                                    return (
+                                        <div className="identify-results-tree-entry" key={feature.id}
+                                            onMouseEnter={() => this.setHighlightedFeatures([feature])}
+                                            onMouseLeave={() => this.setHighlightedFeatures(null)}
+                                        >
+                                            <span className={active ? "identify-results-tree-entry-active" : ""} onClick={()=> this.setCurrentResult(layerid, feature.id)} ref={ref}>
+                                                {feature.displayname}
+                                                {this.state.selectedResults.has(layerid + "$" + feature.id) ? (<Icon icon="pin" />) : null}
+                                            </span>
+                                            {exportEnabled ? (<Icon className="identify-export-result" icon="export" onClick={() => this.exportResult(layerid, feature)} />) : null}
+                                            <Icon className="identify-remove-result" icon="trash" onClick={() => this.removeResult(layerid, feature)} />
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </div>);
+    };
+    toggleExpanded = (layerid) => {
+        this.setState(state => ({
+            collapsedLayers: state.collapsedLayers.toggle(layerid),
+            currentResult: state.currentResult?.layerid === layerid ? null : state.currentResult
+        }));
+    };
+    setCurrentResult = (layerid, featureid) => {
+        if (this.state.currentResult?.layerid === layerid && this.state.currentResult?.featureid === featureid) {
+            this.setState({currentResult: null});
+        } else {
+            this.setState({currentResult: {layerid, featureid}});
+            this.scrollIntoView = true;
         }
-        return (
-            <div className={this.getExpandedClass(layer, true)} key={layer}>
-                <div className="identify-result-entry"
-                    onMouseEnter={() => this.setHighlightedResults(results, this.state.resultTree)}
-                    onMouseLeave={() => this.setHighlightedResults(this.state.currentResult === null ? null : [this.state.currentResult], this.state.resultTree)}
-                >
-                    <span className="clickable" onClick={()=> this.toggleExpanded(layer, true)}><b>{results[0].layertitle}</b></span>
-                    <Icon className="identify-remove-result" icon="minus-sign" onClick={() => this.removeResultLayer(layer)} />
-                    {this.props.enableExport === true || !isEmpty(this.props.enableExport) ? (<Icon className="identify-export-result" icon="export" onClick={() => this.exportResultLayer(layer)} />) : null}
-                </div>
-                <div className="identify-layer-entries">
-                    {results.map(result => this.renderResult(layer, result))}
-                </div>
-            </div>
-        );
     };
-    renderResult = (layer, result) => {
-        const ref = this.state.currentResult === result && this.scrollIntoView ? el => { this.currentResultElRef = el; } : null;
-        return (
-            <div className="identify-result-entry"
-                key={result.id}
-                onMouseEnter={() => this.setHighlightedResults([result], this.state.resultTree)}
-                onMouseLeave={() => this.setHighlightedResults(this.state.currentResult === null ? null : [this.state.currentResult], this.state.resultTree)}
-            >
-                <span className={this.state.currentResult === result ? "active clickable" : "clickable"} onClick={()=> this.setCurrentResult(layer, result)} ref={ref}>{result.displayname}</span>
-                <Icon className="identify-remove-result" icon="minus-sign" onClick={() => this.removeResult(layer, result)} />
-                {this.props.enableExport === true || !isEmpty(this.props.enableExport) ? (<Icon className="identify-export-result" icon="export" onClick={() => this.exportResult(layer, result)} />) : null}
-            </div>
-        );
-    };
-    renderResultAttributes = (layer, result, resultClass) => {
-        if (!result) {
+    renderResultAttributes = (layerid, feature, resultClass) => {
+        if (!feature) {
             return null;
         }
         let resultbox = null;
         let extraattribs = null;
-        let featureReportTemplate = null;
-        if (ConfigUtils.getConfigProp("featureReportService")) {
-            featureReportTemplate = result.featurereport || this.findFeatureReportTemplate(layer);
-        }
         let inlineExtaAttribs = false;
-        if (result.type === "text") {
+        const featureReports = this.state.reports[layerid] || [];
+        if (feature.featurereport) {
+            const parts = feature.featurereport.split(".");
+            featureReports.push({
+                title: null,
+                template: parts.shift(),
+                format: parts.join(".")
+            });
+        }
+        if (feature.type === "text") {
             resultbox = (
                 <pre className="identify-result-box">
-                    {result.text}
+                    {feature.text}
                 </pre>
             );
-        } else if (result.type === "html") {
+        } else if (feature.type === "html") {
             resultbox = (
-                <iframe className="identify-result-box" onLoad={ev => this.setIframeContent(ev.target, result.text)} ref={el => this.pollIframe(el, result.text)} />
+                <iframe className="identify-result-box" onLoad={ev => this.setIframeContent(ev.target, feature.text)} ref={el => this.pollIframe(el, feature.text)} />
             );
-        } else if (result.properties.htmlContent) {
-            if (result.properties.htmlContentInline) {
+        } else if (feature.properties.htmlContent) {
+            if (feature.properties.htmlContentInline) {
                 resultbox = (
-                    <div className="identify-result-box">{this.parsedContent(result.properties.htmlContent)}</div>
+                    <div className="identify-result-box">{this.parsedContent(feature.properties.htmlContent)}</div>
                 );
             } else {
                 resultbox = (
-                    <iframe className="identify-result-box" onLoad={ev => this.setIframeContent(ev.target, result.properties.htmlContent)} ref={el => this.pollIframe(el, result.properties.htmlContent)} />
+                    <iframe className="identify-result-box" onLoad={ev => this.setIframeContent(ev.target, feature.properties.htmlContent)} ref={el => this.pollIframe(el, feature.properties.htmlContent)} />
                 );
             }
         } else {
             inlineExtaAttribs = true;
-            const properties = Object.keys(result.properties) || [];
+            const properties = Object.keys(feature.properties) || [];
             let rows = [];
-            if (properties.length === 1 && result.properties.maptip) {
+            if (properties.length === 1 && feature.properties.maptip) {
                 rows = properties.map(attrib => (
                     <tr key={attrib}>
-                        <td className="identify-attr-value">{this.attribValue(result.properties[attrib], attrib, layer, result)}</td>
+                        <td className="identify-attr-value">{this.attribValue(feature.properties[attrib], attrib, layerid, feature)}</td>
                     </tr>
                 ));
             } else {
                 rows = properties.map(attrib => {
                     if (
-                        this.props.theme.skipEmptyFeatureAttributes &&
-                        (result.properties[attrib] === "" || result.properties[attrib] === null || result.properties[attrib] === "NULL")
+                        (this.props.theme.skipEmptyFeatureAttributes || this.props.skipEmptyFeatureAttributes) &&
+                        (feature.properties[attrib] === "" || feature.properties[attrib] === null || feature.properties[attrib] === "NULL")
                     ) {
                         return null;
                     }
                     return (
                         <tr key={attrib}>
                             <td className={"identify-attr-title " + this.props.longAttributesDisplay}><i>{attrib}</i></td>
-                            <td className={"identify-attr-value " + this.props.longAttributesDisplay}>{this.attribValue(result.properties[attrib], attrib, layer, result)}</td>
+                            <td className={"identify-attr-value " + this.props.longAttributesDisplay}>{this.attribValue(feature.properties[attrib], attrib, layerid, feature)}</td>
                         </tr>
                     );
                 });
             }
-            if (this.props.attributeCalculator) {
-                rows = rows.concat(this.props.attributeCalculator(layer, result));
-            }
-            if (featureReportTemplate) {
-                rows = rows.concat(
-                    <tr key="__featurereport">
-                        <td className={"identify-attr-title " + this.props.longAttributesDisplay}><i>{LocaleUtils.tr("identify.featureReport")}</i></td>
-                        <td className={"identify-attr-value " + this.props.longAttributesDisplay}><a href={this.getFeatureReportUrl(featureReportTemplate, result)}>{LocaleUtils.tr("identify.link")}</a></td>
+            rows.push(...this.computeExtraAttributes(layerid, feature));
+            featureReports.forEach((report, idx) => {
+                rows.push(
+                    <tr key={"__featurereport" + idx}>
+                        <td className={"identify-attr-title " + this.props.longAttributesDisplay}><i>{LocaleUtils.tr("identify.featureReport") + (report.title ? (": " + report.title) : "")}</i></td>
+                        <td className={"identify-attr-value " + this.props.longAttributesDisplay}><a href={this.getFeatureReportUrl(report, feature)} rel="noreferrer" target="_blank">{LocaleUtils.tr("identify.link")}</a></td>
                     </tr>
                 );
-            }
+            });
             if (isEmpty(rows)) {
                 rows = (
                     <tr><td className="identify-attr-value"><i>{LocaleUtils.tr("identify.noattributes")}</i></td></tr>
@@ -443,44 +432,56 @@ class IdentifyViewer extends React.Component {
                 </div>
             );
         }
-        if (!inlineExtaAttribs && (this.props.attributeCalculator || featureReportTemplate)) {
+        if (!inlineExtaAttribs && !isEmpty(this.state.reports[layerid])) {
             extraattribs = (
                 <div className="identify-result-box">
                     <table className="attribute-list"><tbody>
-                        {this.props.attributeCalculator ? this.props.attributeCalculator(layer, result) : null}
-                        {featureReportTemplate ? (
-                            <tr>
+                        {this.computeExtraAttributes(layerid, feature)}
+                        {featureReports.map((report, idx) => (
+                            <tr key={"report" + idx}>
                                 <td className={"identify-attr-title " + this.props.longAttributesDisplay}>
-                                    <i>{LocaleUtils.tr("identify.featureReport")}</i>
+                                    <i>{LocaleUtils.tr("identify.featureReport") + (report.title ? (": " + report.title) : "")}</i>
                                 </td>
                                 <td className={"identify-attr-value " + this.props.longAttributesDisplay}>
-                                    <a href={this.getFeatureReportUrl(featureReportTemplate, result)} rel="noreferrer" target="_blank">
+                                    <a href={this.getFeatureReportUrl(report, feature)} rel="noreferrer" target="_blank">
                                         {LocaleUtils.tr("identify.link")}
                                     </a>
                                 </td>
                             </tr>
-                        ) : null}
+                        ))}
                     </tbody></table>
                 </div>
             );
         }
         let zoomToFeatureButton = null;
-        if (result.bbox && result.crs) {
-            zoomToFeatureButton = (<Icon icon="zoom" onClick={() => this.props.zoomToExtent(result.bbox, result.crs)} />);
+        if (feature.bbox && feature.crs) {
+            zoomToFeatureButton = (<Icon icon="zoom" onClick={() => this.zoomTo({[layerid]: [feature]})} title={LocaleUtils.tr("identify.zoomtofeature")} />);
         }
-        const key = result + ":" + result.id;
-        const expanded = this.state.expandedResults[key];
+        let editButton = null;
+        if (ConfigUtils.havePlugin("Editing") && this.props.editConfigs[feature.wms_name]?.[feature.layername]) {
+            editButton = (<Icon icon="editing" onClick={() => this.props.setCurrentTask("Editing", null, null, {layer: `${feature.wms_name}#${feature.layername}`, feature: feature.id})} title={LocaleUtils.tr("identify.editform")} />);
+        }
+        const key = layerid + "$" + feature.id;
+        const expanded = this.state.expandedResults.has(key);
+        const selected = this.state.selectedResults.has(key);
         return (
-            <div className={resultClass} key="results-attributes">
+            <div
+                className={resultClass} key={key}
+                onMouseEnter={() => this.setHighlightedFeatures([feature])}
+                onMouseLeave={() => this.setHighlightedFeatures(null)}
+            >
                 <div className="identify-result-title">
                     {this.props.collapsible ? (
-                        <Icon icon={expanded ? "tree_minus" : "tree_plus"} onClick={() => this.setState(state => ({expandedResults: {...state.expandedResults, [key]: !expanded}}))} />
-                    ) : (
-                        <Icon icon="minus" onClick={() => this.removeResult(layer, result)} />
-                    )}
-                    <span>{(this.props.showLayerTitles ? (result.layertitle + ": ") : "") + result.displayname}</span>
+                        <Icon icon={expanded ? "triangle-down" : "triangle-right"} onClick={() => this.setState(state => ({expandedResults: state.expandedResults.toggle(key)}))} />
+                    ) : null}
+                    {this.props.enableCompare ? (
+                        <Icon className="identify-result-checkbox" icon={selected ? "checked" : "unchecked"} onClick={() => this.toggleSelectedResult(key)} title={LocaleUtils.tr("identify.selectforcompare")} />
+                    ) : null}
+                    <span>{[this.props.showLayerTitles ? feature.layertitle : "", feature.displayname].filter(Boolean).join(": ")}</span>
                     {zoomToFeatureButton}
-                    <Icon icon="info-sign" onClick={() => this.showLayerInfo(layer, result)} />
+                    {editButton}
+                    <Icon icon="info-sign" onClick={() => this.showLayerInfo(layerid, feature.layerinfo)} title={LocaleUtils.tr("identify.layerinfo")} />
+                    <Icon icon="trash" onClick={() => this.removeResult(layerid, feature)} title={LocaleUtils.tr("identify.removeresult")} />
                 </div>
                 {this.props.collapsible && !expanded ? null : (
                     <div className="identify-result-container">
@@ -491,67 +492,345 @@ class IdentifyViewer extends React.Component {
             </div>
         );
     };
-    render() {
-        const tree = this.props.displayResultTree;
-        let body = null;
-        if (tree) {
-            const contents = Object.keys(this.state.resultTree).map(layer => this.renderLayer(layer));
-            const attributes = this.renderResultAttributes(this.state.currentLayer, this.state.currentResult, 'identify-result-tree-frame');
-            const resultsContainerStyle = {
-                maxHeight: attributes ? '10em' : 'initial'
+    toggleSelectedResult = (key) => {
+        this.setState(state => {
+            const selectedResults = state.selectedResults.toggle(key);
+            return {
+                selectedResults: selectedResults,
+                compareEnabled: selectedResults.size > 1
             };
-            body = [
-                (<div className="identify-results-container" key="results-container" style={resultsContainerStyle}>{contents}</div>),
-                attributes
-            ];
-        } else {
-            body = (
-                <div className="identify-flat-results-list">
-                    {Object.keys(this.state.resultTree).map(layer => {
-                        const layerResults = this.state.resultTree[layer];
-                        return layerResults.map(result => {
-                            const resultClass = this.state.currentResult === result ? 'identify-result-frame-highlighted' : 'identify-result-frame-normal';
-                            return (
-                                <div key={result.id}
-                                    onMouseEnter={() => this.setState({currentResult: result, currentLayer: layer})}
-                                    onMouseLeave={() => this.setState({currentResult: null, currentLayer: null})}
-                                >
-                                    {this.renderResultAttributes(layer, result, resultClass)}
-                                </div>
-                            );
+        });
+    };
+    renderResultsTable = () => {
+        return (
+            <div className="identify-results-tables">
+                {Object.entries(this.props.identifyResults).map(([layerid, features]) => {
+                    if (features.length === 0 || (this.state.selectedLayer && layerid !== this.state.selectedLayer)) {
+                        return null;
+                    }
+
+                    const fields = {};
+                    features.map(feature => {
+                        Object.entries(feature.properties).map(([attr, value]) => {
+                            if (!(attr in fields) && !['htmlContent', 'htmlContentInline'].includes(attr)) {
+                                fields[attr] = {id: attr, name: attr};
+                            }
                         });
+                    });
+                    const haveSel = !isEmpty(this.state.tableSelection[layerid]);
+                    const buttons = [
+                        {key: "Zoom", icon: "zoom", tooltip: LocaleUtils.tr("identify.zoom")},
+                        {key: "Export", icon: "export", tooltip: LocaleUtils.tr("identify.exportobjects")},
+                        {key: "Delete", icon: haveSel ? "trash_checked" : "trash", tooltip: LocaleUtils.tr("identify.removeresults")}
+                    ];
+                    return (
+                        <div className="identify-results-table-container" key={layerid}>
+                            <div className="identify-results-table-titlebar">
+                                <Icon
+                                    icon={this.state.collapsedLayers.has(layerid) ? "expand" : "collapse"}
+                                    onClick={() => this.setState(state => ({collapsedLayers: state.collapsedLayers.toggle(layerid)}))}
+                                />
+                                <span>{features[0].layertitle} ({features.length})</span>
+                                <ButtonBar buttons={buttons} onClick={action => this.tableAction(layerid, action)} />
+                            </div>
+                            {!this.state.collapsedLayers.has(layerid) ? (
+                                <FeaturesTable allowSelectAll
+                                    features={features} fields={Object.values(fields)} hideIdColumn
+                                    hoverChanged={this.setHoveredFeature} renderField={this.renderTableField}
+                                    selection={this.state.tableSelection[layerid] ?? {}}
+                                    selectionChanged={(sel) => this.setTableSelection(sel, layerid)}
+                                />
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    };
+    setTableSelection = (sel, layerid) => {
+        this.setState(state => {
+            const newTableSelection = {...state.tableSelection};
+            if (!isEmpty(sel)) {
+                newTableSelection[layerid] = sel;
+            } else {
+                delete newTableSelection[layerid];
+            }
+            return {tableSelection: newTableSelection};
+        });
+    };
+    setHoveredFeature = (feature) => {
+        this.setHighlightedFeatures(feature ? [feature] : null);
+    };
+    renderTableField = (feature, field) => {
+        return this.attribValue(feature.properties[field.name], field.name, feature.layername, feature);
+    };
+    tableAction = (layerid, action) => {
+        if (action === "Zoom") {
+            const features = isEmpty(this.state.tableSelection[layerid]) ? this.props.identifyResults[layerid] : Object.values(this.state.tableSelection[layerid]);
+            this.zoomTo({[layerid]: features});
+        } else if (action === "Export") {
+            const features = isEmpty(this.state.tableSelection[layerid]) ? this.props.identifyResults[layerid] : Object.values(this.state.tableSelection[layerid]);
+            this.export({layerid: features});
+        } else if (action === "Delete") {
+            this.setState(state => {
+                const selection = state.tableSelection[layerid];
+                const newResults = {...this.props.identifyResults};
+                newResults[layerid] = !isEmpty(selection) ? newResults[layerid].filter(f => !(f.id in selection)) : [];
+                if (isEmpty(newResults[layerid])) {
+                    delete newResults[layerid];
+                }
+                this.props.resultsChanged(newResults);
+            });
+        }
+    };
+    render() {
+        let body = null;
+        const results = this.state.selectedLayer !== '' ? {[this.state.selectedLayer]: this.props.identifyResults[this.state.selectedLayer]} : this.props.identifyResults;
+        const flatResults = Object.entries(results).map(([layerid, features]) => features.map(feature => ([layerid, feature]))).flat();
+        if (this.state.compareEnabled) {
+            const style = {
+                gridTemplateColumns: `repeat(auto-fit, minmax(${this.props.resultGridSize - 2}px, 1fr))`
+            };
+            body = (
+                <div className="identify-compare-results" style={style}>
+                    {this.state.selectedResults.entries().map(key => {
+                        const [layerid, featureid] = key.split("$");
+                        const feature = this.props.identifyResults[layerid].find(f => f.id === featureid);
+                        return this.renderResultAttributes(layerid, feature, "identify-result-frame");
                     })}
                 </div>
             );
-        }
-        // "el.style.background='inherit'": HACK to trigger an additional repaint, since Safari/Chrome on iOS render the element cut off the first time
-        const clipboardExportDisabled = ([...BuiltinExporters, ...this.props.customExporters].find(entry => entry.id === this.state.exportFormat) || {}).allowClipboard !== true;
-        return (
-            <div className="identify-body" ref={el => { if (el) el.style.background = 'inherit'; } }>
-                {body}
-                {this.props.enableExport === true || !isEmpty(this.props.enableExport) ? (
-                    <div className="identify-buttonbox">
-                        <span className="identify-buttonbox-spacer" />
-                        <span>{LocaleUtils.tr("identify.exportformat")}&nbsp;</span>
-                        <select className="combo identify-export-format" onChange={ev => this.setState({exportFormat: ev.target.value})} value={this.state.exportFormat}>
-                            {Object.values(BuiltinExporters).filter(entry => {
-                                return !Array.isArray(this.props.enableExport) || this.props.enableExport.includes(entry.id);
-                            }).map(entry => (
-                                <option key={entry.id} value={entry.id}>{entry.title ?? LocaleUtils.tr(entry.titleMsgId)}</option>
-                            ))}
-                            {Object.values(this.props.customExporters).filter(entry => {
-                                return !Array.isArray(this.props.enableExport) || this.props.enableExport.includes(entry.id);
-                            }).map(entry => (
-                                <option key={entry.id} value={entry.id}>{entry.title ?? LocaleUtils.tr(entry.titleMsgId)}</option>
-                            ))}
-                        </select>
-                        <button className="button" onClick={() => this.exportResults()}><Icon icon="export" /> {LocaleUtils.tr("identify.export")}</button>
-                        <button className="button" disabled={clipboardExportDisabled} onClick={() => this.exportResults(true)} title={LocaleUtils.tr("identify.clipboard")}><Icon icon="copy" /></button>
+        } else if (this.props.resultDisplayMode === 'tree') {
+            body = [
+                this.renderResultTree(),
+                this.renderResultAttributes(this.state.currentResult?.layerid, this.getCurrentResultFeature(), 'identify-result-tree-frame')
+            ];
+        } else if (this.props.resultDisplayMode === 'flat') {
+            body = (
+                <div className="identify-flat-results-list">
+                    {Object.entries(results).map(([layerid, features]) => features.map(feature => (
+                        this.renderResultAttributes(layerid, feature, 'identify-result-frame')
+                    )))}
+                </div>
+            );
+        } else if (this.props.resultDisplayMode === 'paginated') {
+            if (this.state.multiViewEnabled) {
+                const pageResults = flatResults.slice(this.state.currentPage * this.state.pageSize, (this.state.currentPage + 1) * this.state.pageSize);
+                const style = {
+                    gridTemplateColumns: `repeat(auto-fit, minmax(${this.props.resultGridSize - 2}px, 1fr))`
+                };
+                body = (
+                    <div className="identify-compare-results" style={style}>
+                        {pageResults.map(([layerid, feature]) => (
+                            this.renderResultAttributes(layerid, feature, 'identify-result-frame')
+                        ))}
                     </div>
-                ) : null}
+                );
+            } else if (this.state.currentPage < flatResults.length) {
+                const [layerid, feature] = flatResults[this.state.currentPage];
+                body = (
+                    <div className="identify-flat-results-list">
+                        {this.renderResultAttributes(layerid, feature, 'identify-result-frame')}
+                    </div>
+                );
+            }
+        } else if (this.props.resultDisplayMode === 'table') {
+            body = this.renderResultsTable();
+        }
+        return (
+            <div className="identify-body" ref={this.initBody}>
+                {body}
+                {flatResults.length > 0 ? this.renderToolbar(flatResults) : null}
             </div>
         );
     }
+    initBody = (el) => {
+        if (el) {
+            // HACK to trigger an additional repaint, since Safari/Chrome on iOS render the element cut off the first time
+            el.style.background = 'inherit';
+            const resizeObserver = new ResizeObserver(entries => {
+                const contentRectEntry = entries.find(entry => entry.contentRect);
+                if (contentRectEntry) {
+                    this.computePageSize(contentRectEntry.contentRect);
+                }
+            });
+            resizeObserver.observe(el);
+            this.bodyEl = el;
+        }
+    };
+    computePageSize = (rect) => {
+        const s = 2 * this.props.resultGridSize;
+        if (this.state.multiViewEnabled && (rect.height >= s || rect.width >= s)) {
+            this.setState({pageSize: rect.height >= s && rect.width >= s ? 4 : 2, currentPage: 0});
+        } else {
+            this.setState({pageSize: 1});
+        }
+    };
+    renderToolbar = (results) => {
+        const resultCount = results.length;
+        const toggleButton = (key, icon, disabled, tooltip = undefined) => (
+            <button className={"button" + (this.state[key] ? " pressed" : "")} disabled={disabled} onClick={() => this.setState(state => ({[key]: !state[key]}))} title={tooltip}><Icon icon={icon} /></button>
+        );
+        let infoLabel = null;
+        if (this.state.compareEnabled) {
+            infoLabel = (<span>{LocaleUtils.tr("identify.comparing", this.state.selectedResults.size())}</span>);
+        } else {
+            infoLabel = (<span>{LocaleUtils.tr("identify.featurecount", resultCount)}</span>);
+        }
+        const checkedPages = results.reduce((res, entry, idx) => {
+            if (this.state.selectedResults.has(entry[0] + "$" + entry[1].id)) {
+                return [...res, Math.floor(idx / this.state.pageSize)];
+            }
+            return res;
+        }, []);
+        const enabledSettings = {
+            showLayerSelector: this.props.showLayerSelector,
+            paginatedDisplayMode: this.props.resultDisplayMode === 'paginated',
+            exportEnabled: this.props.enableExport === true || !isEmpty(this.props.enableExport),
+            reportsEnabled: this.props.enableAggregatedReports && Object.keys(this.state.reports).length > 0
+        };
+        const haveSettings = Object.values(enabledSettings).find(Boolean) !== undefined;
+        return (
+            <div className="identify-toolbar">
+                {haveSettings ? toggleButton("settingsMenu", "cog", false) : null}
+                {this.state.settingsMenu ? this.renderSettingsMenu(enabledSettings) : null}
+                {this.props.enableCompare && this.props.resultDisplayMode !== "table" ? toggleButton("compareEnabled", "compare", this.state.selectedResults.size() < 2, LocaleUtils.tr("identify.compare")) : null}
+                {this.props.showZoomToResults && (
+                    <button className="button" onClick={() => this.zoomTo(this.props.identifyResults)} title={LocaleUtils.tr("identify.zoom")}><Icon icon="zoom" /></button>
+                )}
+                <span className="identify-toolbar-spacer" />
+                {infoLabel}
+                <span className="identify-toolbar-spacer" />
+                {this.props.resultDisplayMode === 'paginated' && !this.state.compareEnabled ? (
+                    <NavBar currentPage={this.state.currentPage} nPages={Math.ceil(resultCount / this.state.pageSize)} pageChanged={page => this.setState({currentPage: page})} pageSizes={[1]} selectedPages={checkedPages} />
+                ) : null}
+            </div>
+        );
+    };
+    renderSettingsMenu = (enabledSettings) => {
+        const exporters = Object.fromEntries(this.getExporters().map(exporter => ([exporter.id, exporter])));
+        const enabledExporters = Array.isArray(this.props.enableExport) ? this.props.enableExport.filter(id => id in exporters) : Object.keys(exporters);
+        const clipboardExportDisabled = exporters[this.state.exportFormat]?.allowClipboard !== true;
+        return (
+            <div className="identify-settings-menu">
+                <table>
+                    <tbody>
+                        {enabledSettings.showLayerSelector ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("identify.results")}:</td>
+                                <td>
+                                    <div className="controlgroup">
+                                        <select className="controlgroup-expanditem" onChange={ev => this.setSelectedLayer(ev.target.value)}>
+                                            <option value=''>{LocaleUtils.tr("identify.layerall")}</option>
+                                            {Object.keys(this.props.identifyResults).filter(key => this.props.identifyResults[key].length).map(
+                                                layer => (
+                                                    <option key={layer} value={layer}>
+                                                        {this.props.identifyResults[layer][0].layertitle}
+                                                    </option>
+                                                ))}
+                                        </select>
+                                    </div>
+                                </td>
+                            </tr>
+                        ) : null}
+                        {enabledSettings.paginatedDisplayMode ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("identify.multiview")}</td>
+                                <td>
+                                    <ToggleSwitch
+                                        active={this.state.multiViewEnabled}
+                                        onChange={(active) => this.setState({multiViewEnabled: active, currentPage: 0})} />
+                                </td>
+                            </tr>
+                        ) : null}
+                        {enabledSettings.exportEnabled ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("common.export")}:</td>
+                                <td>
+                                    <div className="controlgroup">
+                                        <select className="controlgroup-expanditem" onChange={ev => this.setState({exportFormat: ev.target.value})} value={this.state.exportFormat}>
+                                            {enabledExporters.map(id => (
+                                                <option key={id} value={id}>{exporters[id].title ?? LocaleUtils.tr(exporters[id].titleMsgId)}</option>
+                                            ))}
+                                        </select>
+                                        <button className="button" onClick={() => this.exportResults()} title={LocaleUtils.tr("common.download")}>
+                                            <Icon icon="export" />
+                                        </button>
+                                        <button className="button" disabled={clipboardExportDisabled} onClick={() => this.exportResults(true)} title={LocaleUtils.tr("identify.clipboard")}>
+                                            <Icon icon="copy" />
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        ) : null}
+                        {enabledSettings.reportsEnabled ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("identify.aggregatedreport")}:</td>
+                                <td>
+                                    <div className="controlgroup">
+                                        <select className="controlgroup-expanditem" onChange={ev => this.setState({selectedAggregatedReport: ev.target.value})} value={this.state.selectedAggregatedReport}>
+                                            <option disabled value=''>{LocaleUtils.tr("identify.selectreport")}</option>
+                                            {Object.entries(this.state.reports).map(([layername, reports]) => {
+                                                return reports.map((report, idx) => (
+                                                    <option key={layername + "::" + idx} value={layername + "::" + idx}>{report.title}</option>
+                                                ));
+                                            })}
+                                        </select>
+                                        <button
+                                            className="button"
+                                            disabled={!this.state.selectedAggregatedReport || this.state.generatingReport}
+                                            onClick={this.downloadAggregatedReport}
+                                        >
+                                            {this.state.generatingReport ? (<Spinner />) : (<Icon icon="report" />)}
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        ) : null}
+                    </tbody>
+                </table>
+            </div>
+        );
+    };
+    setSelectedLayer = (layer) => {
+        this.setState(state => {
+            let newSelectedResults = state.selectedResults;
+            if (layer !== '') {
+                newSelectedResults = state.selectedResults.filtered(key => key.startsWith(layer + "$"));
+            }
+            return {
+                selectedResults: newSelectedResults,
+                selectedLayer: layer
+            };
+        });
+    };
+    computeExtraAttributes = (layer, result) => {
+        const rows = [];
+        Object.values(window.qwc2?.__attributeCalculators || {}).forEach((calc, idx) => {
+            const row = calc(layer, result);
+            if (row.length === 2) {
+                rows.push((
+                    <tr key={"custom-attr-" + idx}>
+                        <td className="identify-attr-title"><i>{row[0]}</i></td>
+                        <td className="identify-attr-value">{row[1]}</td>
+                    </tr>
+                ));
+            } else if (row.length === 1) {
+                rows.push((
+                    <tr key={"custom-attr-" + idx}>
+                        <td colSpan="2">{row[0]}</td>
+                    </tr>
+                ));
+            }
+        });
+        return rows;
+    };
+    getExporters = () => {
+        return [
+            ...IdentifyExporters,
+            ...Object.values(window.qwc2?.__identifyExportes || [])
+        ];
+    };
     setIframeContent = (iframe, html) => {
         if (iframe.getAttribute("identify-content-set")) {
             return;
@@ -585,59 +864,89 @@ class IdentifyViewer extends React.Component {
                 reports = {...reports, ...this.collectFeatureReportTemplates(sublayer)};
             }
         } else if (entry.featureReport) {
-            reports[entry.title] = entry.featureReport;
+            reports[entry.name] = entry.featureReport;
         }
         return reports;
     };
     findFeatureReportTemplate = (layer) => {
-        const themeLayer = this.props.layers.find(l => l.role === LayerRole.THEME);
-        if (!themeLayer) {
-            return null;
-        }
-        return this.collectFeatureReportTemplates(themeLayer)[layer] || null;
+        let reports = {};
+        this.props.layers.filter(l => l.role === LayerRole.THEME).forEach(themeLayer => {
+            reports = {...reports, ...this.collectFeatureReportTemplates(themeLayer)};
+        });
+        return reports[layer] || null;
     };
-    getFeatureReportUrl = (template, result) => {
-        const serviceUrl = ConfigUtils.getConfigProp("featureReportService").replace(/\/$/, "");
+    getFeatureReportUrl = (report, result) => {
+        const serviceUrl = ConfigUtils.getConfigProp("documentServiceUrl").replace(/\/$/, "");
         const params = {
             feature: result.id,
             x: result.clickPos[0],
             y: result.clickPos[1],
-            crs: this.props.mapcrs
+            crs: this.props.map.projection,
+            single_report: report.single_report || false
         };
-        return serviceUrl + "/" + template + "?" + Object.keys(params).map(key => encodeURIComponent(key) + "=" + encodeURIComponent(params[key])).join("&");
+        const path = "/" + report.template + "." + (report.format || "pdf");
+        const query = Object.keys(params).map(key => encodeURIComponent(key) + "=" + encodeURIComponent(params[key])).join("&");
+        return serviceUrl + path + "?" + query;
     };
-    showLayerInfo = (featureInfoLayerId, result) => {
-        let match = null;
-        // Search matching layer by technical name
-        for (const name of [result.layername, result.layerinfo]) {
-            match = LayerUtils.searchLayer(this.props.layers, 'name', name);
-            if (match) {
-                break;
-            }
+    downloadAggregatedReport = () => {
+        const [layername, idx] = this.state.selectedAggregatedReport.split("::");
+        const report = this.state.reports[layername][idx];
+        const results = this.props.identifyResults[layername];
+        const serviceUrl = ConfigUtils.getConfigProp("documentServiceUrl").replace(/\/$/, "");
+        const params = {
+            feature: results.map(result => result.id).join(","),
+            x: results[0].clickPos[0],
+            y: results[0].clickPos[1],
+            crs: this.props.map.projection,
+            single_report: report.single_report || false
+        };
+        this.setState({generatingReport: true});
+        const url = serviceUrl + "/" + report.template;
+        axios.get(url, {params, responseType: "arraybuffer"}).then(response => {
+            const format = report.format || "pdf";
+            const filename = (report.filename || report.title.replace(" ", "_")) + "." + format;
+            const mimeType = mime.lookup(filename) || "application/octet-stream";
+            FileSaver.saveAs(new Blob([response.data], {type: mimeType}), filename);
+            this.setState({generatingReport: false});
+        }).catch(() => {
+            /* eslint-disable-next-line */
+            alert(LocaleUtils.tr("identify.reportfail"));
+            this.setState({generatingReport: false});
+        });
+    };
+    showLayerInfo = (layer, infolayer) => {
+        const [layerUrl, layerName] = layer.split('#');
+        if (!infolayer) {
+            infolayer = layerName;
         }
-        if (!match) {
-            // Search matching layer by title
-            match = LayerUtils.searchLayer(this.props.layers, 'title', result.layertitle);
-        }
+        const match = LayerUtils.searchLayer(this.props.layers, 'url', layerUrl, 'name', infolayer);
         if (match) {
             this.props.setActiveLayerInfo(match.layer, match.sublayer);
         }
     };
     attribValue = (text, attrName, layer, result) => {
+        if (typeof text === 'object') {
+            text = JSON.stringify(text);
+        }
         if (this.props.replaceImageUrls && /^https?:\/\/.*\.(jpg|jpeg|png|bmp)$/i.exec(text)) {
             return (<a href={text} rel="noreferrer" target="_blank"><img src={text} /></a>);
         }
         text = "" + text; // Ensure text is a string
-        text = this.props.attributeTransform(attrName, text, layer, result);
+        for (const formatter of Object.values(window.qwc2?.__attributeFormatters || {})) {
+            text = formatter(attrName, text, layer, result);
+            if (React.isValidElement(text)) {
+                return text;
+            }
+        }
         text = MiscUtils.addLinkAnchors(text);
         return this.parsedContent(text);
     };
     parsedContent = (text) => {
-        text = text.replace('&#10;', '<br />');
+        text = MiscUtils.sanitizeHtml(text).replace('&#10;', '<br />');
         const options = {replace: (node) => {
             if (node.name === "a") {
                 return (
-                    <a href={node.attribs.href} onClick={node.attribs.onclick ? (ev) => this.evalOnClick(ev, node.attribs.onclick) : this.attributeLinkClicked} target={node.attribs.target || "_blank"}>
+                    <a href={node.attribs.href} onClick={this.attributeLinkClicked} target={node.attribs.target || "_blank"}>
                         {domToReact(node.children, options)}
                     </a>
                 );
@@ -646,27 +955,39 @@ class IdentifyViewer extends React.Component {
         }};
         return htmlReactParser(text, options);
     };
-    evalOnClick = (ev, onclick) => {
-        // eslint-disable-next-line
-        eval(onclick);
+    attributeLinkClicked = (ev) => {
+        this.props.openExternalUrl(ev.currentTarget.href, ev.currentTarget.target, {docked: this.props.iframeDialogsInitiallyDocked});
         ev.preventDefault();
     };
-    attributeLinkClicked = (ev) => {
-        this.props.openExternalUrl(ev.target.href, ev.target.target, {docked: this.props.iframeDialogsInitiallyDocked});
-        ev.preventDefault();
+    zoomTo = (results) => {
+        const bbox = VectorLayerUtils.computeFeaturesBBox(Object.values(results).flat());
+        if (bbox) {
+            const maxZoom = MapUtils.computeZoom(this.props.map.scales, this.props.theme.minSearchScaleDenom || 1000);
+            this.props.zoomToExtent(bbox.bounds, bbox.crs, 0, undefined, maxZoom);
+        }
+        Object.keys(results).forEach(layerId => {
+            const [layerUrl, layerName] = layerId.split('#');
+            const match = LayerUtils.searchLayer(this.props.layers, 'url', layerUrl, 'name', layerName);
+            if (match) {
+                this.props.changeLayerProperty(match.layer.id, "visibility", true, match.path);
+            }
+        });
     };
 }
 
 const selector = (state) => ({
+    editConfigs: state.layers.editConfigs,
     theme: state.theme.current,
     layers: state.layers.flat,
-    mapcrs: state.map.projection
+    map: state.map
 });
 
 export default connect(selector, {
     addLayerFeatures: addLayerFeatures,
+    changeLayerProperty: changeLayerProperty,
     removeLayer: removeLayer,
     setActiveLayerInfo: setActiveLayerInfo,
+    setCurrentTask: setCurrentTask,
     openExternalUrl: openExternalUrl,
     zoomToExtent: zoomToExtent
 })(IdentifyViewer);

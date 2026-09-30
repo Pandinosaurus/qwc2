@@ -1,6 +1,6 @@
 /**
  * Copyright 2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,13 +8,18 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+import ReactDOM from 'react-dom';
 import {connect} from 'react-redux';
+
 import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+
 import {LayerRole} from '../actions/layers';
-import OlMap from '../components/map/OlMap';
 import OlLayer from '../components/map/OlLayer';
-import Spinner from '../components/Spinner';
+import OlMap from '../components/map/OlMap';
+import {MapContainerPortalContext} from '../components/PluginsContainer';
+import ViewSwitcher from '../components/ViewSwitcher';
+import Spinner from '../components/widgets/Spinner';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 
@@ -24,7 +29,8 @@ import './style/Map.css';
 /**
  * The main map component.
  */
-class MapPlugin extends React.Component {
+class Map extends React.Component {
+    static contextType = MapContainerPortalContext;
     static propTypes = {
         layers: PropTypes.array,
         loadingLayers: PropTypes.array,
@@ -37,19 +43,23 @@ class MapPlugin extends React.Component {
             panStepSize: PropTypes.number,
             panPageSize: PropTypes.number,
             constrainExtent: PropTypes.bool,
-            kineticPanParams: PropTypes.object,
+            constrainOnlyCenter: PropTypes.bool,
+            kineticPanParams: PropTypes.object
         }),
         /** Whether to display the loading spinner when layers are loading. */
         showLoading: PropTypes.bool,
         swipe: PropTypes.number,
         /** A list of layer geometry types to ignore when determining the top-most layer to compare. */
         swipeGeometryTypeBlacklist: PropTypes.arrayOf(PropTypes.string),
-        /** A list of layer names to ignore when determining the top-most layer to compare. You can use `*` as a whildcard character. */
+        /** A list of layer names to ignore when determining the top-most layer to compare. You can use `*` as a wildcard character. */
         swipeLayerNameBlacklist: PropTypes.arrayOf(PropTypes.string),
         theme: PropTypes.object,
         tools: PropTypes.object,
-        /** Map tool configuraiton options. Refer to the sample config.json. */
-        toolsOptions: PropTypes.object
+        /** Options to pass to the map support plugins, in the form `{"<Name>": {<options>}}`.
+         * Refer to the documentation of the <a href="#mapSupportPlugins">Map support plugins</a> for settable options. */
+        toolsOptions: PropTypes.object,
+        /** Position of the view switcher button. */
+        viewSwitcherPosition: PropTypes.number
     };
     static defaultProps = {
         mapOptions: {},
@@ -57,7 +67,8 @@ class MapPlugin extends React.Component {
         swipeGeometryTypeBlacklist: [],
         swipeLayerNameBlacklist: [],
         tools: {},
-        toolsOptions: {}
+        toolsOptions: {},
+        viewSwitcherPosition: 6
     };
     state = {
         renderLayers: [],
@@ -110,7 +121,6 @@ class MapPlugin extends React.Component {
                             // Add new renderlayer
                             renderLayers.push({
                                 ...layer,
-                                uuid: layer.uuid + "-" + i,
                                 params: {
                                     ...layer.params,
                                     LAYERS: sublayers[i],
@@ -151,7 +161,7 @@ class MapPlugin extends React.Component {
                             if (j > 0) {
                                 newLayers.push({
                                     ...layer,
-                                    uuid: layer.uuid + ":0",
+                                    id: layer.id + ":0",
                                     params: {
                                         LAYERS: paramLayers.slice(0, j).join(","),
                                         OPACITIES: paramOpacities.slice(0, j).join(","),
@@ -161,7 +171,7 @@ class MapPlugin extends React.Component {
                             }
                             swipeLayer = {
                                 ...layer,
-                                uuid: layer.uuid + ":1",
+                                id: layer.id + ":1",
                                 params: {
                                     LAYERS: paramLayers[j],
                                     OPACITIES: paramOpacities[j],
@@ -172,7 +182,7 @@ class MapPlugin extends React.Component {
                             if (j < paramLayers.length - 1) {
                                 newLayers.push({
                                     ...layer,
-                                    uuid: layer.uuid + ":2",
+                                    id: layer.id + ":2",
                                     params: {
                                         LAYERS: paramLayers.slice(j + 1).join(","),
                                         OPACITIES: paramOpacities.slice(j + 1).join(","),
@@ -199,21 +209,27 @@ class MapPlugin extends React.Component {
     }
     renderLayers = () => {
         let zIndex = 0;
+        const usedKeys = new Set();
         return this.state.renderLayers.map(layer => {
             if (layer.type === "placeholder") {
                 return null;
             }
             ++zIndex;
             const swipe = this.props.swipe !== null && layer === this.state.swipeLayer;
+            let key = layer.id;
+            for (let i = 0; usedKeys.has(key); ++i) {
+                key = layer.id + ":" + i;
+            }
+            usedKeys.add(key);
             return (
-                <OlLayer key={layer.uuid} options={layer} swipe={swipe ? this.props.swipe : null} zIndex={layer.zIndex ?? zIndex} />
+                <OlLayer key={key} options={layer} swipe={swipe ? this.props.swipe : null} zIndex={layer.zIndex ?? zIndex} />
             );
         });
     };
     renderSupportTools = () => {
         return Object.entries(this.props.tools).map(([key, Tool]) => {
             const options = this.props.toolsOptions[key] || {};
-            return <Tool key={key} options={options}/>;
+            return <Tool key={key} {...options} />;
         });
     };
     render() {
@@ -231,12 +247,20 @@ class MapPlugin extends React.Component {
                 }
             }, 1000);
         }
-        return [(
-            <OlMap id="map" key="map" mapOptions={this.props.mapOptions} {...this.props.map} fullExtent={this.props.theme?.bbox}>
-                {this.renderLayers()}
-                {this.renderSupportTools()}
-            </OlMap>
-        ), loadingIndicator];
+        return ReactDOM.createPortal([
+            (
+                <div className="map-contents" id="map" key="map" tabIndex="0">
+                    <OlMap id="map" key="map" mapOptions={this.props.mapOptions} {...this.props.map} fullExtent={this.props.theme?.bbox}>
+                        {this.renderLayers()}
+                        {this.renderSupportTools()}
+                    </OlMap>
+                </div>
+            ),
+            (
+                <ViewSwitcher key="ViewSwitcher" position={this.props.viewSwitcherPosition} />
+            ),
+            loadingIndicator
+        ], this.context);
     }
 }
 
@@ -248,5 +272,5 @@ export default (tools) => {
         swipe: state.layers.swipe,
         theme: state.theme.current,
         tools
-    }))(MapPlugin);
+    }))(Map);
 };

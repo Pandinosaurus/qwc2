@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,9 +7,10 @@
  */
 
 import Painterro from 'painterro';
+
 import LocaleUtils from '../utils/LocaleUtils';
-import StandardStore from '../stores/StandardStore';
-import '../components/style/ModalDialog.css';
+
+import '../components/widgets/style/ModalDialog.css';
 
 export function showImageEditor(imageData, imageDataCallback) {
     // Do old-school JS rather than react portal as portal event bubbling messes up Painterro
@@ -48,13 +49,13 @@ export function showImageEditor(imageData, imageDataCallback) {
 
     modalDialogContainer.appendChild(modalDialog);
 
-    document.body.appendChild(modalDialogContainer);
+    (document.querySelector('.plugins-container') ?? document.body).appendChild(modalDialogContainer);
 
     // eslint-disable-next-line
     window.ptro = Painterro({
         id: 'painterro',
         hiddenTools: ['open'],
-        language: StandardStore.get().getState().locale.current.slice(0, 2).toLowerCase(),
+        language: LocaleUtils.lang().slice(0, 2).toLowerCase(),
         onBeforeClose: (hasUnsaved, doClose) => {
             if (hasUnsaved) {
                 // eslint-disable-next-line
@@ -66,14 +67,20 @@ export function showImageEditor(imageData, imageDataCallback) {
         onClose: () => {
             window.ptro.hide();
             delete window.ptro;
-            document.body.removeChild(modalDialogContainer);
+            // Delay to next iteration to ensure ptro event handlers have executed
+            setTimeout(() => {
+                modalDialogContainer.remove();
+            }, 0);
         },
         saveHandler: (image, done) => {
             imageDataCallback(image.asDataURL('image/jpeg'));
             done(true);
             window.ptro.hide();
             delete window.ptro;
-            document.body.removeChild(modalDialogContainer);
+            // Delay to next iteration to ensure ptro event handlers have executed
+            setTimeout(() => {
+                modalDialogContainer.remove();
+            }, 0);
         }
     }).show(imageData);
 
@@ -82,7 +89,10 @@ export function showImageEditor(imageData, imageDataCallback) {
         if (confirm(LocaleUtils.tr("imageeditor.confirmclose"))) {
             window.ptro.hide();
             delete window.ptro;
-            document.body.removeChild(modalDialogContainer);
+            // Delay to next iteration to ensure ptro event handlers have executed
+            setTimeout(() => {
+                modalDialogContainer.remove();
+            }, 0);
         }
     });
 }

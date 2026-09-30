@@ -7,9 +7,12 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import {setCurrentTask, openExternalUrl} from '../actions/task';
+
+import PropTypes from 'prop-types';
+
+import {setCurrentTask} from '../actions/task';
+import {openExternalUrl} from '../actions/windows';
 import AppMenu from '../components/AppMenu';
 import Icon from '../components/Icon';
 import ThemeList from '../components/ThemeList';
@@ -17,6 +20,7 @@ import ConfigUtils from '../utils/ConfigUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import {UrlParams} from '../utils/PermaLinkUtils';
 import ThemeUtils from '../utils/ThemeUtils';
+
 import './style/Portal.css';
 
 
@@ -32,8 +36,12 @@ class Portal extends React.Component {
             labelmsgid: PropTypes.string,
             target: PropTypes.string
         })),
+        /** Whether to allow collapsing groups in the theme switcher. */
+        collapsibleGroups: PropTypes.bool,
         currentTask: PropTypes.string,
         currentTheme: PropTypes.object,
+        /** Whether to expand theme groups by default. */
+        expandGroups: PropTypes.bool,
         keepMenuOpen: PropTypes.bool,
         /** Name of a logo image below assets/img. */
         logo: PropTypes.string,
@@ -42,14 +50,18 @@ class Portal extends React.Component {
         menuItems: PropTypes.array,
         openExternalUrl: PropTypes.func,
         setCurrentTask: PropTypes.func,
+        /** Whether to show a button to close the portal without selecting a theme. */
+        showCloseButton: PropTypes.bool,
         /** Whether the menu should be visible on startup. */
         showMenuOnStartup: PropTypes.bool,
+        startupParams: PropTypes.object,
         themes: PropTypes.object,
         /** Portal title text to show in the top bar. */
         topBarText: PropTypes.string,
         userName: PropTypes.string
     };
     static defaultProps = {
+        showCloseButton: true,
         menuItems: []
     };
     state = {
@@ -58,7 +70,7 @@ class Portal extends React.Component {
         menuVisible: false
     };
     componentDidMount() {
-        if (!UrlParams.getParam('t') && !UrlParams.getParam('k') && !UrlParams.getParam('bk')) {
+        if (!this.props.startupParams.t && !this.props.startupParams.k && !this.props.startupParams.bk && !this.props.startupParams.vp) {
             this.props.setCurrentTask("Portal");
         }
     }
@@ -71,18 +83,22 @@ class Portal extends React.Component {
             UrlParams.clear();
         } else if (!prevProps.themes && this.props.themes && this.props.currentTask !== "Portal") {
             // Show portal if no theme is to be loaded
-            const theme = ThemeUtils.getThemeById(this.props.themes, UrlParams.getParam('t'));
-            if ((!theme || theme.restricted) && (ConfigUtils.getConfigProp("dontLoadDefaultTheme") || !this.props.themes.defaultTheme)) {
+            const theme = ThemeUtils.getThemeById(this.props.themes, this.props.startupParams.t);
+            if ((!theme || theme.restricted)
+                && !this.props.startupParams.vp
+                && (ConfigUtils.getConfigProp("dontLoadDefaultTheme") || !this.props.themes.defaultTheme)) {
                 this.props.setCurrentTask("Portal");
             }
         }
     }
     render() {
-        const style = {display: this.props.currentTask !== "Portal" ? 'none' : 'initial'};
+        if (this.props.currentTask !== "Portal") {
+            return null;
+        }
         const assetsPath = ConfigUtils.getAssetsPath();
         const preserveSettings = ConfigUtils.getConfigProp("preserveSettingsOnPortalThemeSwitch");
         return (
-            <div className="Portal" style={style}>
+            <div className="Portal">
                 <div className="portal-topbar">
                     <img className="portal-logo" src={assetsPath + "/img/" + this.props.logo} />
                     <span className="portal-topbar-text" dangerouslySetInnerHTML={{__html: this.props.topBarText}} />
@@ -92,14 +108,22 @@ class Portal extends React.Component {
                         placeholder={LocaleUtils.tr("portal.filter")}
                         type="text"
                         value={this.state.filter} />
+                    {this.props.showCloseButton ? (
+                        <button className="portal-close-button button" onClick={() => this.props.setCurrentTask(null)} type="button">
+                            <Icon icon="remove" /><span>{LocaleUtils.tr("portal.close")}</span>
+                        </button>
+                    ) : null}
                     <span className="portal-topbar-spacer" />
-                    <AppMenu appMenuClearsTask={false} buttonContents={this.menuButtonContents()}
-                        keepMenuOpen={this.props.keepMenuOpen} menuItems={this.props.menuItems} onMenuToggled={this.menuToggled}
-                        openExternalUrl={this.openUrl}
-                        showOnStartup={this.props.showMenuOnStartup} />
+                    {this.props.menuItems.length > 0 ? (
+                        <AppMenu appMenuClearsTask={false} buttonLabel={LocaleUtils.tr("portal.menulabel")}
+                            keepMenuOpen={this.props.keepMenuOpen} menuItems={this.props.menuItems} onMenuToggled={this.menuToggled}
+                            openExternalUrl={this.openUrl} showOnStartup={this.props.showMenuOnStartup} />
+                    ) : null}
                 </div>
                 <div className={"portal-body " + (this.state.menuVisible ? "portal-body-menuvisible" : "")}>
-                    <ThemeList collapsibleGroups dontPreserveSettingsOnSwitch={!preserveSettings} filter={this.state.filter} />
+                    <ThemeList
+                        collapsibleGroups={this.props.collapsibleGroups} dontPreserveSettingsOnSwitch={!preserveSettings}
+                        expandGroups={this.props.expandGroups} filter={this.state.filter} />
                 </div>
                 <div className="portal-bottombar">
                     {this.props.userName ? (
@@ -109,9 +133,9 @@ class Portal extends React.Component {
                     ) : null}
                     <div className="portal-bottombar-links">
                         {(this.props.bottomBarLinks || []).map((link, idx) => {
-                            const label = link.labelmsgid ? LocaleUtils.tr(link.labelmsgid) : link.label;
+                            const label = link.label ?? LocaleUtils.tr(link.labelmsgid);
                             return (
-                                <a href="#" key={"l" + idx} onClick={() => this.openUrl(link.href, link.target, {title: label})}>{label}</a>
+                                <a href="#" key={"l" + idx} onClick={(ev) => {ev.preventDefault(); this.openUrl(link.href, link.target, label);}}>{label}</a>
                             );
                         })}
                     </div>
@@ -119,14 +143,6 @@ class Portal extends React.Component {
             </div>
         );
     }
-    menuButtonContents = () => {
-        return (
-            <span className="portal-menu-button">
-                <span className="portal-menu-label">{LocaleUtils.tr("portal.menulabel")}</span>
-                <Icon className="portal-menu-icon" icon="menu-hamburger"/>
-            </span>
-        );
-    };
     openUrl = (url, target, title) => {
         if (target === "iframe") {
             target = ":iframedialog:externallinkiframe";
@@ -143,6 +159,7 @@ const selector = (state) => ({
     currentTheme: state.theme.current,
     map: state.map,
     themes: state.theme.themes,
+    startupParams: state.localConfig.startupParams,
     userName: state.localConfig.username || ""
 });
 

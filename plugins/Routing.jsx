@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,42 +8,45 @@
 
 import React from 'react';
 import {connect} from 'react-redux';
+import Sortable from 'react-sortablejs';
+
+import FileSaver from 'file-saver';
 import PropTypes from 'prop-types';
 import {createSelector} from 'reselect';
-import FileSaver from 'file-saver';
-import NumericInput from 'react-numeric-input2';
-import Sortable from 'react-sortablejs';
+import {v4 as uuidv4} from 'uuid';
+
 import {LayerRole, addLayerFeatures, removeLayer} from '../actions/layers';
 import {zoomToExtent} from '../actions/map';
 import {setCurrentTask} from '../actions/task';
 import Icon from '../components/Icon';
-import InputContainer from '../components/InputContainer';
+import ResizeableWindow from '../components/ResizeableWindow';
 import ButtonBar from '../components/widgets/ButtonBar';
 import DateTimeInput from '../components/widgets/DateTimeInput';
+import NumberInput from '../components/widgets/NumberInput';
 import SearchWidget from '../components/widgets/SearchWidget';
-import Spinner from '../components/Spinner';
-import ResizeableWindow from '../components/ResizeableWindow';
+import Spinner from '../components/widgets/Spinner';
 import ToggleSwitch from '../components/widgets/ToggleSwitch';
 import VectorLayerPicker from '../components/widgets/VectorLayerPicker';
-import displayCrsSelector from '../selectors/displaycrs';
+import searchProvidersSelector from '../selectors/searchproviders';
 import ConfigUtils from '../utils/ConfigUtils';
 import CoordinatesUtils from '../utils/CoordinatesUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import MeasureUtils from '../utils/MeasureUtils';
 import RoutingInterface from '../utils/RoutingInterface';
-import './style/Routing.css';
 import VectorLayerUtils from '../utils/VectorLayerUtils';
+
+import './style/Routing.css';
 
 
 /**
  * Compute routes and isochrones.
  *
- * Requites `routingServiceUrl` in `config.json` pointing to a Valhalla routing service.
+ * Requires `routingServiceUrl` in `config.json` pointing to a Valhalla routing service.
  */
 class Routing extends React.Component {
     static propTypes = {
         addLayerFeatures: PropTypes.func,
-        displaycrs: PropTypes.string,
+        displayCrs: PropTypes.string,
         /** List of enabled routing modes. */
         enabledModes: PropTypes.arrayOf(PropTypes.string),
         /** List of search providers to use for routing location search. */
@@ -59,7 +62,7 @@ class Routing extends React.Component {
         }),
         layers: PropTypes.array,
         locatePos: PropTypes.array,
-        mapcrs: PropTypes.string,
+        mapCrs: PropTypes.string,
         removeLayer: PropTypes.func,
         searchProviders: PropTypes.object,
         setCurrentTask: PropTypes.func,
@@ -67,20 +70,35 @@ class Routing extends React.Component {
         showPinLabels: PropTypes.bool,
         task: PropTypes.object,
         theme: PropTypes.object,
+        /** Set of units for isochrone time/distance intervals to use. */
+        units: PropTypes.object,
+        /** Automatically zoom to the extent of the route */
+        zoomAuto: PropTypes.bool,
         zoomToExtent: PropTypes.func
     };
     static defaultProps = {
         enabledModes: ["auto", "heavyvehicle", "transit", "bicycle", "pedestrian"],
         enabledProviders: ["coordinates", "nominatim"],
         geometry: {
-            initialWidth: 320,
+            initialWidth: 480,
             initialHeight: 640,
             initialX: 0,
             initialY: 0,
             initiallyDocked: true,
             side: 'left'
         },
-        showPinLabels: true
+        showPinLabels: true,
+        units: {
+            time: {
+                min: 1,
+                s: 60
+            },
+            distance: {
+                km: 1,
+                m: 1000
+            }
+        },
+        zoomAuto: true
     };
     state = {
         visible: false,
@@ -132,6 +150,10 @@ class Routing extends React.Component {
                 {text: '', pos: null, crs: null}
             ],
             mode: 'time',
+            units: {
+                time: 'min',
+                distance: 'km'
+            },
             intervals: '5, 10',
             result: null
         },
@@ -142,15 +164,19 @@ class Routing extends React.Component {
     constructor(props) {
         super(props);
         this.recomputeTimeout = null;
-        this.state.searchProviders = props.enabledProviders.map(key => props.searchProviders[key]);
-        this.state.searchParams = {
-            mapcrs: this.props.mapcrs,
-            displaycrs: this.props.displaycrs,
-            lang: LocaleUtils.lang()
-        };
         this.state.mode = this.props.enabledModes[0];
     }
     componentDidUpdate(prevProps, prevState) {
+        // Recollect search providers
+        if (this.props.searchProviders !== prevProps.searchProviders) {
+            this.setState({
+                searchProviders: this.props.enabledProviders.map(key => this.props.searchProviders[key]).filter(Boolean),
+                searchParams: {
+                    mapcrs: this.props.mapCrs,
+                    displaycrs: this.props.displayCrs
+                }
+            });
+        }
         // Activated / message
         if (this.props.task.id === "Routing") {
             this.props.setCurrentTask(null);
@@ -234,11 +260,11 @@ class Routing extends React.Component {
             Reachability: this.renderIsochroneWidget
         };
         const buttons = [
-            {key: "auto", icon: "routing-car", tooltip: LocaleUtils.trmsg("routing.mode_auto")},
-            {key: "heavyvehicle", icon: "routing-truck", tooltip: LocaleUtils.trmsg("routing.mode_heavyvehicle")},
-            {key: "transit", icon: "routing-train", tooltip: LocaleUtils.trmsg("routing.mode_transit")},
-            {key: "bicycle", icon: "routing-bicycle", tooltip: LocaleUtils.trmsg("routing.mode_bicycle")},
-            {key: "pedestrian", icon: "routing-walking", tooltip: LocaleUtils.trmsg("routing.mode_walking")}
+            {key: "auto", icon: "routing-car", tooltip: LocaleUtils.tr("routing.mode_auto")},
+            {key: "heavyvehicle", icon: "routing-truck", tooltip: LocaleUtils.tr("routing.mode_heavyvehicle")},
+            {key: "transit", icon: "routing-train", tooltip: LocaleUtils.tr("routing.mode_transit")},
+            {key: "bicycle", icon: "routing-bicycle", tooltip: LocaleUtils.tr("routing.mode_bicycle")},
+            {key: "pedestrian", icon: "routing-walking", tooltip: LocaleUtils.tr("routing.mode_walking")}
         ];
         const enabledButtons = this.props.enabledModes.map(entry => buttons.find(button => button.key === entry));
         return (
@@ -248,10 +274,10 @@ class Routing extends React.Component {
                 initiallyDocked={this.props.geometry.initiallyDocked}
                 onClose={() => this.setState({visible: false})} title={LocaleUtils.tr("routing.windowtitle")}
             >
-                <div className="routing-body" role="body">
+                <div className="routing-body">
                     <ButtonBar active={this.state.currentTab} buttons={tabButtons} className="routing-buttonbar" onClick={(key) => this.setState({currentTab: key})} />
                     <div className="routing-frame">
-                        <div className="routing-buttons">
+                        <div className="routing-buttons controlgroup">
                             <ButtonBar active={this.state.mode} buttons={enabledButtons} onClick={key => this.setState({mode: key})} />
                             <button className={"button" + (this.state.settingsPopup ? " pressed" : "")} onClick={() => this.setState((state) => ({settingsPopup: !state.settingsPopup}))}>
                                 <Icon icon="cog" />
@@ -285,10 +311,9 @@ class Routing extends React.Component {
                             <tr>
                                 <td>{LocaleUtils.tr("routing.maxspeed")}:</td>
                                 <td>
-                                    <NumericInput
-                                        format={x => x + " km/h"} max={250} min={1} mobile
+                                    <NumberInput max={350} min={1} mobile
                                         onChange={(value) => this.updateSetting(this.state.mode, {maxSpeed: value})}
-                                        precision={0} step={1} strict value={settings.maxSpeed} />
+                                        suffix=" km/h" value={settings.maxSpeed} />
                                 </td>
                             </tr>
                         ) : null}
@@ -349,7 +374,7 @@ class Routing extends React.Component {
                         <span className="routing-points-commands-spacer" />
                         {this.renderImportButton('routeConfig')}
                         <span className="routing-points-commands-spacer" />
-                        <a href="#" onClick={() => this.clearConfig('routeConfig')}><Icon icon="clear" /> {LocaleUtils.tr("routing.clear")}</a>
+                        <a href="#" onClick={() => this.clearConfig('routeConfig')}><Icon icon="clear" /> {LocaleUtils.tr("common.clear")}</a>
                     </div>
                     {this.state.mode === 'transit' ? (
                         <div className="routing-time-settings">
@@ -372,7 +397,7 @@ class Routing extends React.Component {
                         </div>
                     ) : null}
                     {ConfigUtils.havePlugin("Redlining") ? (
-                        <div className="routing-points-commands">
+                        <div className="routing-points-commands controlgroup">
                             <span>{LocaleUtils.tr("routing.excludepolygons")}:&nbsp;</span>
                             <VectorLayerPicker
                                 layers={vectorLayers} onChange={layer => this.updateRouteConfig({excludeLayer: (layer || {}).id})}
@@ -414,7 +439,9 @@ class Routing extends React.Component {
                         <span className="routing-result-spacer" />
                         <span><Icon icon="measure" /> {MeasureUtils.formatMeasurement(routeConfig.result.data.summary.length, false)}</span>
                         <span className="routing-result-spacer" />
-                        <span><Icon icon="export" /> <a href="#" onClick={this.exportRoute}>{LocaleUtils.tr("routing.export")}</a></span>
+                        <span><Icon icon="export" /> <a href="#" onClick={this.exportRoute}>{LocaleUtils.tr("common.export")}</a></span>
+                        <span className="routing-result-spacer" />
+                        <span><Icon icon="layers" /> <a href="#" onClick={this.addRouteLayer}>{LocaleUtils.tr("routing.addlayer")}</a></span>
                     </div>
                     <div className="routing-result-instructions">
                         {routeConfig.result.data.legs.map((leg, lidx) => leg.maneuvers.map((entry, eidx) => (
@@ -488,7 +515,22 @@ class Routing extends React.Component {
                                 <td>
                                     <input className={isoConfig.intervals && !intervalValid ? "routing-input-invalid" : ""} onChange={(ev) => this.updateIsoConfig({intervals: ev.target.value})} placeholder="5, 10, 15" type="text" value={isoConfig.intervals} />
                                 </td>
-                                <td>{isoConfig.mode === "time" ? "min" : "km"}</td>
+                                <td>
+                                    <select onChange={ev => {
+                                        this.setState((state) => ({
+                                            isoConfig: {
+                                                ...state.isoConfig,
+                                                units: {
+                                                    ...state.isoConfig.units,
+                                                    [state.isoConfig.mode]: ev.target.value
+                                                }
+                                            }
+                                        }));
+                                        this.recomputeIfNeeded();
+                                    }} value={isoConfig.units[isoConfig.mode]}>
+                                        {Object.keys(this.props.units[isoConfig.mode]).map(unit => <option key={unit} value={unit}>{unit}</option>)}
+                                    </select>
+                                </td>
                             </tr>
                         </tbody>
                     </table>
@@ -497,7 +539,7 @@ class Routing extends React.Component {
                         <span className="routing-points-commands-spacer" />
                         {this.renderImportButton('isoConfig')}
                         <span className="routing-points-commands-spacer" />
-                        <a href="#" onClick={() => this.clearConfig('isoConfig')}><Icon icon="clear" /> {LocaleUtils.tr("routing.clear")}</a>
+                        <a href="#" onClick={() => this.clearConfig('isoConfig')}><Icon icon="clear" /> {LocaleUtils.tr("common.clear")}</a>
                     </div>
                 </div>
                 {isoConfig.busy ? (
@@ -518,7 +560,9 @@ class Routing extends React.Component {
             return (
                 <div className="routing-result">
                     <div className="routing-result-summary">
-                        <Icon icon="export" /> <a href="#" onClick={this.exportIsochrone}>{LocaleUtils.tr("routing.export")}</a>
+                        <span><Icon icon="export" /> <a href="#" onClick={this.exportIsochrone}>{LocaleUtils.tr("common.export")}</a></span>
+                        <span className="routing-result-spacer" />
+                        <span><Icon icon="layers" /> <a href="#" onClick={this.addIsochroneLayer}>{LocaleUtils.tr("routing.addlayer")}</a></span>
                     </div>
                 </div>
             );
@@ -526,7 +570,7 @@ class Routing extends React.Component {
     };
     renderSearchField = (entry, idx, config, removeable, placeholder = null) => {
         return (
-            <InputContainer className="routing-search-field" key={"field" + idx}>
+            <div className="routing-search-field controlgroup" key={"field" + idx}>
                 <SearchWidget placeholder={placeholder} resultSelected={(result) => this.searchResultSelected(config, idx, result)} role="input" searchParams={this.state.searchParams} searchProviders={this.state.searchProviders} value={entry.text} />
                 {idx === 0 ? (
                     <button className="button" disabled={!this.props.locatePos} onClick={() => this.updatePoint(config, 0, this.locatePos())} role="suffix">
@@ -538,7 +582,7 @@ class Routing extends React.Component {
                         <Icon icon="remove" />
                     </button>
                 ) : null}
-            </InputContainer>
+            </div>
         );
     };
     renderImportButton = (config) => {
@@ -599,7 +643,7 @@ class Routing extends React.Component {
                 if (obj.crs && obj.crs.properties) {
                     crs = CoordinatesUtils.fromOgcUrnCrs(obj.crs.properties.name);
                 }
-                const prec = CoordinatesUtils.getUnits(crs) === 'degrees' ? 4 : 0;
+                const prec = CoordinatesUtils.getPrecision(crs);
                 this.setState((state) => ({[config]: {
                     ...state[config],
                     points: obj.features.map(feature => {
@@ -612,7 +656,7 @@ class Routing extends React.Component {
                     })
                 }}));
                 this.recomputeIfNeeded();
-            } catch (e) {
+            } catch {
                 // eslint-disable-next-line
                 alert(LocaleUtils.tr("routing.importerror"));
             }
@@ -717,7 +761,7 @@ class Routing extends React.Component {
                 settings.exclude_polygons = layer.features.filter(feature => {
                     return feature.geometry.type === "Polygon";
                 }).map(feature => {
-                    return VectorLayerUtils.reprojectGeometry(feature.geometry, this.props.mapcrs, "EPSG:4326").coordinates[0];
+                    return VectorLayerUtils.reprojectGeometry(feature.geometry, this.props.mapCrs, "EPSG:4326").coordinates[0];
                 });
             }
         }
@@ -763,7 +807,9 @@ class Routing extends React.Component {
                 });
                 this.updateRouteConfig({points: reorderedPoints, result: {success, data: result}, busy: false}, false);
 
-                this.props.zoomToExtent(result.summary.bounds, "EPSG:4326", -1);
+                if (this.props.zoomAuto) {
+                    this.props.zoomToExtent(result.summary.bounds, "EPSG:4326", -1);
+                }
             } else {
                 this.updateRouteConfig({result: {success, data: result}, busy: false}, false);
             }
@@ -779,9 +825,10 @@ class Routing extends React.Component {
         });
         this.props.removeLayer("routinggeometries");
         this.updateIsoConfig({busy: true, result: null}, false);
+        const unitsFactor = this.props.units[this.state.isoConfig.mode][this.state.isoConfig.units[this.state.isoConfig.mode]];
         const contourOptions = {
             mode: this.state.isoConfig.mode,
-            intervals: this.state.isoConfig.intervals.split(",").map(entry => parseInt(entry.trim(), 10)).sort()
+            intervals: this.state.isoConfig.intervals.split(",").map(entry => parseInt(entry.trim(), 10) / unitsFactor).sort()
         };
         RoutingInterface.computeIsochrone(this.state.mode, locations, contourOptions, this.state.settings[this.state.mode], (success, result) => {
             if (success) {
@@ -804,7 +851,9 @@ class Routing extends React.Component {
                     }
                 }));
                 this.props.addLayerFeatures(layer, features, true);
-                this.props.zoomToExtent(result.bounds, "EPSG:4326", -0.5);
+                if (this.props.zoomAuto) {
+                    this.props.zoomToExtent(result.bounds, "EPSG:4326", -0.5);
+                }
             }
             this.updateIsoConfig({result: {success, data: result}, busy: false}, false);
         });
@@ -820,35 +869,74 @@ class Routing extends React.Component {
             this.recomputeTimeout = null;
         }, 750);
     };
+    collectRoutingFeatures = () => {
+        return this.state.routeConfig.result.data.legs.map(leg => ({
+            type: "Feature",
+            properties: {
+                time: leg.time,
+                length: leg.length
+            },
+            geometry: {
+                type: "LineString",
+                coordinates: leg.coordinates
+            },
+            styleName: "default",
+            styleOptions: {
+                strokeColor: [10, 10, 255, 1],
+                strokeWidth: 4,
+                strokeDash: []
+            }
+        }));
+    };
     exportRoute = () => {
         const data = JSON.stringify({
             type: "FeatureCollection",
-            features: this.state.routeConfig.result.data.legs.map(leg => ({
-                type: "Feature",
-                properties: {
-                    time: leg.time,
-                    length: leg.length
-                },
-                geometry: {
-                    type: "LineString",
-                    coordinates: leg.coordinates
-                }
-            }))
+            features: this.collectRoutingFeatures()
         });
         FileSaver.saveAs(new Blob([data], {type: "text/plain;charset=utf-8"}), "route.json");
+    };
+    addRouteLayer = () => {
+        const layer = {
+            id: uuidv4(),
+            crs: "EPSG:4326",
+            title: LocaleUtils.tr("routing.route"),
+            type: 'vector'
+        };
+        this.props.addLayerFeatures(layer, this.collectRoutingFeatures());
+        this.props.setCurrentTask("LayerTree");
+    };
+    collectIsochroneFeatures = () => {
+        return this.state.isoConfig.result.data.areas.map(area => ({
+            type: "Feature",
+            geometry: {
+                type: "Polygon",
+                coordinates: [area]
+            },
+            styleName: "default",
+            styleOptions: {
+                strokeColor: [10, 10, 255, 1],
+                fillColor: [10, 10, 255, 0.5],
+                strokeWidth: 4,
+                strokeDash: []
+            }
+        }));
     };
     exportIsochrone = () => {
         const data = JSON.stringify({
             type: "FeatureCollection",
-            features: this.state.isoConfig.result.data.areas.map(area => ({
-                type: "Feature",
-                geometry: {
-                    type: "Polygon",
-                    coordinates: [area]
-                }
-            }))
+            features: this.collectIsochroneFeatures()
         });
         FileSaver.saveAs(new Blob([data], {type: "text/plain;charset=utf-8"}), "isochrone.json");
+    };
+    addIsochroneLayer = () => {
+        const layer = {
+            id: uuidv4(),
+            crs: "EPSG:4326",
+            title: LocaleUtils.tr("routing.reachability"),
+            type: 'vector'
+        };
+        this.props.addLayerFeatures(layer, this.collectIsochroneFeatures());
+        this.props.setCurrentTask("LayerTree");
     };
     onSortChange = (order, sortable, ev) => {
         const newpoints = this.state.routeConfig.points.slice(0);
@@ -858,20 +946,17 @@ class Routing extends React.Component {
     };
 }
 
-export default (searchProviders) => {
-    const providers = {...searchProviders, ...window.QWC2SearchProviders || {}};
-    return connect(createSelector([state => state, displayCrsSelector], (state, displaycrs) => ({
-        task: state.task,
-        theme: state.theme.current,
-        mapcrs: state.map.projection,
-        searchProviders: providers,
-        displaycrs: displaycrs,
-        layers: state.layers.flat,
-        locatePos: state.locate.position
-    })), {
-        addLayerFeatures: addLayerFeatures,
-        removeLayer: removeLayer,
-        setCurrentTask: setCurrentTask,
-        zoomToExtent: zoomToExtent
-    })(Routing);
-};
+export default connect(createSelector([state => state, searchProvidersSelector], (state, searchProviders) => ({
+    displayCrs: state.map.displayCrs,
+    layers: state.layers.flat,
+    locatePos: state.locate.position,
+    mapCrs: state.map.projection,
+    searchProviders: searchProviders,
+    task: state.task,
+    theme: state.theme.current
+})), {
+    addLayerFeatures: addLayerFeatures,
+    removeLayer: removeLayer,
+    setCurrentTask: setCurrentTask,
+    zoomToExtent: zoomToExtent
+})(Routing);

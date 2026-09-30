@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -13,7 +13,9 @@ const defaultState = {
     mode: null,
     data: null,
     blocked: false,
-    unsetOnMapClick: false
+    unsetOnMapClick: false,
+    identifyEnabled: true,
+    unblockedIdentifyEnabled: true
 };
 
 export default function task(state = defaultState, action) {
@@ -22,10 +24,21 @@ export default function task(state = defaultState, action) {
         if (state.blocked) {
             return state;
         }
-        return {...state, id: action.id, mode: action.mode, data: action.data, unsetOnMapClick: action.unsetOnMapClick};
+        return {
+            ...state,
+            id: action.id,
+            mode: action.mode,
+            data: action.data,
+            unsetOnMapClick: action.unsetOnMapClick,
+            identifyEnabled: action.identifyEnabled,
+            unblockedIdentifyEnabled: action.identifyEnabled
+        };
     }
     case SET_CURRENT_TASK_BLOCKED: {
-        return {...state, blocked: action.blocked};
+        return {
+            ...state,
+            blocked: action.blocked,
+            identifyEnabled: action.blocked ? false : state.unblockedIdentifyEnabled};
     }
     default:
         return state;

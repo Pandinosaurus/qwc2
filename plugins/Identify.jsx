@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,23 +7,15 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import isEmpty from 'lodash.isempty';
-import NumericInput from "react-numeric-input2";
-import buffer from "@turf/buffer";
-import { point as turfpoint } from "@turf/helpers";
-import {LayerRole, addLayerFeatures, addMarker, removeMarker, removeLayer} from '../actions/layers';
-import {changeSelectionState} from '../actions/selection';
-import {setCurrentTask} from '../actions/task';
-import IdentifyViewer from '../components/IdentifyViewer';
-import ResizeableWindow from '../components/ResizeableWindow';
-import TaskBar from '../components/TaskBar';
-import IdentifyUtils from '../utils/IdentifyUtils';
-import LocaleUtils from '../utils/LocaleUtils';
-import VectorLayerUtils from '../utils/VectorLayerUtils';
 
-import './style/Identify.css';
+import PropTypes from 'prop-types';
+
+import IdentifyTool from '../components/IdentifyTool';
+import ConfigUtils from '../utils/ConfigUtils';
+import CoordinatesUtils from '../utils/CoordinatesUtils';
+import LocaleUtils from '../utils/LocaleUtils';
+import {UrlParams} from '../utils/PermaLinkUtils';
 
 
 /**
@@ -38,30 +30,24 @@ import './style/Identify.css';
  */
 class Identify extends React.Component {
     static propTypes = {
-        addLayerFeatures: PropTypes.func,
-        addMarker: PropTypes.func,
-        /** Optional function for computing derived attributes. See js/IdentifyExtensions.js for details. This prop can be specified in the appConfig.js cfg section. */
-        attributeCalculator: PropTypes.func,
-        /** Optional function for transforming attribute values. See js/IdentifyExtensions.js for details. This prop can be specified in the appConfig.js cfg section. */
-        attributeTransform: PropTypes.func,
-        changeSelectionState: PropTypes.func,
+        /** Whether to append results by default (without having to press `CTRL` when clicking). */
+        appendResultsByDefault: PropTypes.bool,
+        /** Available region identify modes. */
+        availableRegionModes: PropTypes.arrayOf(PropTypes.string),
         /** Whether to clear the identify results when exiting the identify tool. */
         clearResultsOnClose: PropTypes.bool,
-        click: PropTypes.object,
-        currentIdentifyTool: PropTypes.string,
-        currentTask: PropTypes.string,
-        /** Optional list of custom exporters to offer along with the built-in exporters. See js/IdentifyExtensions.js for details. This prop can be specified in the appConfig.js cfg section. */
-        customExporters: PropTypes.array,
-        /** Whether to display a tree overview of results (as opposed to a flat list of results). */
-        displayResultTree: PropTypes.bool,
-        /** Whether to enable the export functionality. Either `true|false` or a list of single allowed formats (builtin formats: `json`, `geojson`, `csv`, `csvzip`) */
+        currentSearchResult: PropTypes.object,
+        /** Whether to enable the aggregated report download button. */
+        enableAggregatedReports: PropTypes.bool,
+        /** Whether to enable the possibility select results for comparison. */
+        enableCompare: PropTypes.bool,
+        /** Whether to enable the export functionality. Either `true|false` or a list of single allowed formats (builtin formats: `json`, `geojson`, `csv`, `csvzip`, `shapefile`, `xlsx`). If a list is provided, the export formats will be sorted according to that list, and the default format will be the first format of the list. */
         enableExport: PropTypes.oneOfType([PropTypes.bool, PropTypes.array]),
+        enabled: PropTypes.bool,
         /** Whether to clear the task when the results window is closed. */
         exitTaskOnResultsClose: PropTypes.bool,
         /** Whether to include the geometry in exported features. Default: `true`. */
         exportGeometry: PropTypes.bool,
-        /** Whether to assume that XML GetFeatureInfo responses specify the technical layer name in the `name` attribute, rather than the layer title. */
-        featureInfoReturnsLayerName: PropTypes.bool,
         /** Default window geometry with size, position and docking status. Positive position values (including '0') are related to top (InitialY) and left (InitialX), negative values (including '-0') to bottom (InitialY) and right (InitialX). */
         geometry: PropTypes.shape({
             initialWidth: PropTypes.number,
@@ -69,384 +55,149 @@ class Identify extends React.Component {
             initialX: PropTypes.number,
             initialY: PropTypes.number,
             initiallyDocked: PropTypes.bool,
-            side: PropTypes.string
+            side: PropTypes.string,
+            minimizeable: PropTypes.bool
         }),
-        iframeDialogsInitiallyDocked: PropTypes.bool,
-        /** The initial radius of the identify dialog in radius mode. */
-        initialRadius: PropTypes.number,
-        /** The initial radius units of the identify dialog in radius mode. One of 'meters', 'feet', 'kilometers', 'miles'. */
+        /** Whether to highlight all results if no result is hovered. */
+        highlightAllResults: PropTypes.bool,
+        /** Whether to trigger an identify when selecting a search result. */
+        identifySearchResults: PropTypes.bool,
+        /** The initial radius units of the identify dialog in radius mode. One of 'm', 'ft', 'km', 'mi'. */
         initialRadiusUnits: PropTypes.string,
-        layers: PropTypes.array,
-        longAttributesDisplay: PropTypes.string,
-        map: PropTypes.object,
+        layerFilter: PropTypes.object,
+        /** How to handle long attribute names / values. */
+        longAttributesDisplay: PropTypes.oneOf(["wrap", "ellipsis"]),
+        /** Whether to only show the results dialog if there are results to display. */
+        onlyShowDialogWithResults: PropTypes.bool,
+        /** Extra params to append to the GetFeatureInfo request (i.e. `FI_POINT_TOLERANCE`, `FI_LINE_TOLERANCE`, `feature_count`, ...). Additionally, `region_feature_count` is supported. */
         params: PropTypes.object,
-        removeLayer: PropTypes.func,
-        removeMarker: PropTypes.func,
         /** Whether to replace an attribute value containing an URL to an image with an inline image. */
         replaceImageUrls: PropTypes.bool,
-        selection: PropTypes.object,
-        setCurrentTask: PropTypes.func,
-        /** Whether to highlight all results if no result is hovered */
-        highlightAllResults: PropTypes.bool
+        /** Result display mode. */
+        resultDisplayMode: PropTypes.oneOf(["tree", "flat", "paginated", "table"]),
+        /** Target cell size of the result grid in comparison mode. */
+        resultGridSize: PropTypes.number,
+        /** Whether multi-display mode should be enabled by default, only relevant if `resultDisplayMode` is `paginated`. */
+        resultMultiDisplay: PropTypes.bool,
+        /** Lookup of `{"<layerUrl#layerName>": "<key>"}` of keys (i.e. the feature attribute name) used when serializing selections. If `selectionSerializeKeys` is set, only the layers listed will be exported. */
+        selectionSerializeKeys: PropTypes.object,
+        /** Whether to show a layer selector to filter the identify results by layer. */
+        showLayerSelector: PropTypes.bool,
+        /** Whether to prefix the identify result titles with the respecitve layer name. */
+        showLayerTitles: PropTypes.bool,
+        /** Show zoom to all results button. */
+        showZoomToResults: PropTypes.bool,
+        /** Whether to skip empty feature attributes. */
+        skipEmptyFeatureAttributes: PropTypes.bool,
+        startupParams: PropTypes.object,
+        theme: PropTypes.object
     };
     static defaultProps = {
+        availableRegionModes: ['Region', 'Radius', 'Circle', 'Rectangle'],
+        enableAggregatedReports: true,
+        enableCompare: true,
         enableExport: true,
         exportGeometry: true,
         clearResultsOnClose: true,
-        customExporters: [],
-        longAttributesDisplay: 'ellipsis',
-        displayResultTree: true,
+        longAttributesDisplay: 'wrap',
+        resultDisplayMode: 'flat',
+        resultGridSize: 200,
+        resultMultiDisplay: false,
         replaceImageUrls: true,
-        featureInfoReturnsLayerName: true,
         geometry: {
             initialWidth: 240,
             initialHeight: 320,
             initialX: 0,
             initialY: 0,
             initiallyDocked: false,
-            side: 'left'
+            side: 'left',
+            minimizeable: false
         },
-        initialRadius: 50,
-        initialRadiusUnits: 'meters',
-        highlightAllResults: true
+        initialRadiusUnits: 'm',
+        highlightAllResults: true,
+        showLayerSelector: true,
+        showLayerTitles: true
     };
-    state = {
-        mode: 'Point',
-        identifyResults: null,
-        pendingRequests: 0,
-        radius: this.props.initialRadius,
-        radiusUnits: this.props.initialRadiusUnits,
-        exitTaskOnResultsClose: null
-    };
-    componentDidUpdate(prevProps) {
-        if (this.props.currentIdentifyTool !== prevProps.currentIdentifyTool && prevProps.currentIdentifyTool === "Identify") {
-            this.clearResults();
-        }
-        if (this.props.currentIdentifyTool === "Identify" || this.props.currentTask === "Identify") {
-            if (this.state.mode === "Point") {
-                const clickPoint = this.queryPoint(prevProps);
-                this.identifyPoint(clickPoint);
-            } else if (this.state.mode === "Region") {
-                this.identifyRegion(prevProps);
-            } else if (this.state.mode === "Radius") {
-                this.identifyRadius(prevProps);
+    constructor(props) {
+        super(props);
+        this.toolRef = null;
+    }
+    componentDidUpdate(prevProps, prevState) {
+        if (this.props.theme && !prevProps.theme) {
+            const startupParams = this.props.startupParams;
+            const haveIc = ["1", "true"].includes((startupParams.ic || "").toLowerCase());
+            const c = (startupParams.c || "").split(/[;,]/g).map(x => parseFloat(x) || 0);
+            if (this.props.enabled && haveIc && c.length === 2) {
+                const mapCrs = this.props.theme.mapCrs;
+                this.toolRef.identifyPoint(CoordinatesUtils.reproject(c, startupParams.crs || mapCrs, mapCrs));
+            } else if (startupParams.if) {
+                // Handled even when Identify is not the current identify tool, see identifyFeaturesPending
+                this.pendingIdentifyFilter = startupParams.if;
+                UrlParams.updateParams({if: undefined});
             }
+        }
+        if (this.pendingIdentifyFilter) {
+            this.identifyFeaturesPending();
         }
     }
-    identifyPoint = (clickPoint) => {
-        if (clickPoint) {
-            this.setState((state) => {
-                // Remove any search selection layer to avoid confusion
-                this.props.removeLayer("searchselection");
-                let pendingRequests = 0;
-                const identifyResults = this.props.click.modifiers.ctrl !== true ? {} : state.identifyResults;
-
-                let queryableLayers = [];
-                queryableLayers = IdentifyUtils.getQueryLayers(this.props.layers, this.props.map);
-                queryableLayers.forEach(l => {
-                    const request = IdentifyUtils.buildRequest(l, l.queryLayers.join(","), clickPoint, this.props.map, this.props.params);
-                    ++pendingRequests;
-                    IdentifyUtils.sendRequest(request, (response) => {
-                        this.setState((state2) => ({pendingRequests: state2.pendingRequests - 1}));
-                        if (response) {
-                            this.parseResult(response, l, request.params.info_format, clickPoint);
-                        }
-                    });
-                });
-
-                if (!isEmpty(this.props.click.features)) {
-                    this.props.click.features.forEach((feature) => {
-                        const layer = this.props.layers.find(l => l.id === feature.layerId);
-                        if (layer && layer.role === LayerRole.USERLAYER && !isEmpty(feature.properties)) {
-                            if (!identifyResults[layer.name]) {
-                                identifyResults[layer.name] = [];
-                            }
-                            const queryFeature = {...feature};
-                            queryFeature.crs = layer.projection;
-                            queryFeature.displayname = queryFeature.properties.name || queryFeature.properties.Name || queryFeature.properties.NAME || queryFeature.properties.label || queryFeature.properties.id || queryFeature.id;
-                            queryFeature.layertitle = layer.title || layer.name || layer.id;
-                            queryFeature.properties = Object.entries(queryFeature.properties).reduce((res, [key, val]) => ({
-                                ...res, [key]: typeof val === "object" ? JSON.stringify(val) : val
-                            }), {});
-                            identifyResults[layer.name].push(queryFeature);
-                        }
-                    });
-                }
-                this.props.addMarker('identify', clickPoint, '', this.props.map.projection);
-                return {identifyResults: identifyResults, pendingRequests: pendingRequests};
-            });
-        }
-    };
-    queryPoint = (prevProps) => {
-        if (this.props.click.button !== 0 || this.props.click === prevProps.click || (this.props.click.features || []).find(feature => feature.id === 'startupposmarker')) {
-            return null;
-        }
-        const searchMarker = (this.props.click.features || []).find(feature => feature.id === 'searchmarker');
-        if (searchMarker) {
-            return searchMarker.geometry.coordinates;
-        }
-        return this.props.click.coordinate;
-    };
-    identifyRegion = (prevProps) => {
-        if (!this.props.selection.polygon || this.props.selection === prevProps.selection) {
+    identifyFeaturesPending = () => {
+        // MapFilter applies the startup filter behind a debounce, wait for it so that the
+        // identify filter is combined with the map filter rather than replacing it
+        const awaitMapFilter = this.props.startupParams.f && ConfigUtils.havePlugin("MapFilter");
+        if (awaitMapFilter && this.props.layerFilter?.filterParams === null) {
             return;
         }
-        const poly = this.props.selection.polygon;
-        const queryableLayers = IdentifyUtils.getQueryLayers(this.props.layers, this.props.map);
-        if (poly.length < 1 || isEmpty(queryableLayers)) {
-            return;
-        }
-        const identifyResults = this.props.click.modifiers.ctrl !== true ? {} : this.state.identifyResults;
-        this.props.changeSelectionState({reset: true});
-        const geometry = {
-            type: "Polygon",
-            coordinates: [poly]
-        };
-        const center = [0, 0];
-        poly.forEach(point => {
-            center[0] += point[0];
-            center[1] += point[1];
-        });
-        center[0] /= poly.length;
-        center[1] /= poly.length;
-
-        const filter = VectorLayerUtils.geoJSONGeomToWkt(geometry);
-        let pendingRequests = 0;
-        const params = {...this.props.params};
-        if (this.props.params.region_feature_count) {
-            params.feature_count = this.props.params.region_feature_count;
-            delete params.region_feature_count;
-        }
-        queryableLayers.forEach(layer => {
-            const request = IdentifyUtils.buildFilterRequest(layer, layer.queryLayers.join(","), filter, this.props.map, params);
-            ++pendingRequests;
-            IdentifyUtils.sendRequest(request, (response) => {
-                this.setState((state) => ({pendingRequests: state.pendingRequests - 1}));
-                if (response) {
-                    this.parseResult(response, layer, request.params.info_format, center);
-                }
-            });
-            this.setState({identifyResults: identifyResults, pendingRequests: pendingRequests});
-        });
-    };
-    identifyRadius = (prevProps) => {
-        if (!this.props.selection.point || this.props.selection.point === prevProps.selection.point) {
-            return;
-        }
-        const clickPoint = this.props.selection.point;
-        if (clickPoint) {
-            const circle = this.computeBuffer(clickPoint);
-            const queryableLayers = IdentifyUtils.getQueryLayers(this.props.layers, this.props.map);
-            if (isEmpty(queryableLayers)) {
-                return;
-            }
-            const poly = circle.geometry.coordinates[0];
-            const identifyResults = this.props.click.modifiers.ctrl !== true ? {} : this.state.identifyResults;
-            this.props.changeSelectionState({ reset: true });
-            const geometry = {
-                type: "Polygon",
-                coordinates: [poly]
-            };
-
-            const filter = VectorLayerUtils.geoJSONGeomToWkt(geometry);
-            let pendingRequests = 0;
-            queryableLayers.forEach((layer) => {
-                const request = IdentifyUtils.buildFilterRequest(layer, layer.queryLayers.join(","), filter, this.props.map, this.props.params);
-                ++pendingRequests;
-                IdentifyUtils.sendRequest(request, (response) => {
-                    this.setState((state) => ({pendingRequests: state.pendingRequests - 1}));
-                    if (response) {
-                        this.parseResult(response, layer, request.params.info_format, clickPoint);
-                    }
-                });
-                this.setState({identifyResults: identifyResults, pendingRequests: pendingRequests});
-            });
-            this.props.addMarker("identify", clickPoint, "", this.props.map.projection);
-        }
-    };
-    changeBufferUnit = (ev) => {
-        this.setState({ radiusUnits: ev.target.value });
-    };
-    computeBuffer = (point) => {
-        const layer = {
-            id: "identifyradiusbuffer",
-            role: LayerRole.SELECTION
-        };
-        const feature = turfpoint(point);
-        const wgsGeometry = VectorLayerUtils.reprojectGeometry(feature.geometry, this.props.map.projection, "EPSG:4326");
-        const wgsFeature = { ...feature, geometry: wgsGeometry };
-        const output = buffer(wgsFeature, this.state.radius, {units: this.state.radiusUnits});
-        if (output && output.geometry) {
-            output.geometry = VectorLayerUtils.reprojectGeometry(output.geometry, "EPSG:4326", this.props.map.projection);
-            output.id = "buffer";
-            output.styleName = "default";
-            output.styleOptions = {
-                fillColor: [255, 0, 0, 0.15],
-                strokeColor: [255, 0, 0, 1]
-            };
-            this.props.addLayerFeatures(layer, [output]);
-        }
-        return output;
-    };
-    parseResult = (response, layer, format, clickPoint) => {
-        const newResults = IdentifyUtils.parseResponse(response, layer, format, clickPoint, this.props.map.projection, this.props.featureInfoReturnsLayerName, this.props.layers);
-        // Merge with previous
-        this.setState((state) => {
-            const identifyResults = { ...state.identifyResults };
-            Object.keys(newResults).forEach((layername) => {
-                const existingFeatures = identifyResults[layername] || [];
-                newResults[layername].forEach((newFeature) => {
-                    const featureIndex = existingFeatures.findIndex((feature) => feature.id === newFeature.id);
-                    if (featureIndex !== -1) {
-                        existingFeatures.splice(featureIndex, 1);
-                    } else {
-                        existingFeatures.push(newFeature);
-                    }
-                });
-                identifyResults[layername] = existingFeatures;
-            });
-            return {identifyResults: identifyResults};
-        });
-    };
-    onShow = (mode, data) => {
-        this.setState({mode: mode || 'Point', exitTaskOnResultsClose: data?.exitTaskOnResultsClose});
-        if (mode === "Point" && data?.pos) {
-            this.identifyPoint(data.pos);
-        }
-        if (mode === "Region") {
-            this.props.changeSelectionState({geomType: 'Polygon'});
-        }
-        if (mode === "Radius") {
-            this.props.changeSelectionState({geomType: 'Point'});
-        }
-    };
-    onToolClose = () => {
-        this.props.changeSelectionState({geomType: undefined});
-        this.setState({mode: 'Point', exitTaskOnResultsClose: null});
-        if (this.props.clearResultsOnClose) {
-            this.clearResults();
-        }
-    };
-    onWindowClose = () => {
-        this.clearResults();
-        if (this.state.exitTaskOnResultsClose || this.props.exitTaskOnResultsClose) {
-            this.props.setCurrentTask(null);
-        }
-    };
-    clearResults = () => {
-        this.props.removeMarker('identify');
-        this.props.removeLayer("identifyslection");
-        this.props.removeLayer("identifyradiusbuffer");
-        this.setState({identifyResults: null, pendingRequests: 0});
-    };
-    renderRadiusContent = () => {
-        return (
-            <div className="identify-radius-controls">
-                <span>
-                    <span>{LocaleUtils.tr("infotool.radius")} &nbsp;</span>
-                    <NumericInput
-                        max={10000}
-                        min={1}
-                        mobile
-                        onChange={(nr) => this.setState({ radius: nr })}
-                        precision={0}
-                        step={10}
-                        strict
-                        value={this.state.radius}
-                    />
-                    <select
-                        onChange={this.changeBufferUnit}
-                        value={this.state.radiusUnits}
-                    >
-                        <option value="meters">m</option>
-                        <option value="feet">ft</option>
-                        <option value="kilometers">km</option>
-                        <option value="miles">mi</option>
-                    </select>
-                </span>
-            </div>
-        );
-    };
-    renderBody = () => {
-        if (this.state.mode === "Point") {
-            return LocaleUtils.tr("infotool.clickhelpPoint");
-        } else if (this.state.mode === "Region") {
-            return LocaleUtils.tr("infotool.clickhelpPolygon");
-        } else if (this.state.mode === "Radius") {
-            const text = LocaleUtils.tr("infotool.clickhelpRadius");
-            return (
-                <div>
-                    <div>
-                        <span>{text}</span>
-                    </div>
-                    {this.renderRadiusContent()}
-                </div>
-            );
-        }
-        return null;
+        const identifyFilter = this.pendingIdentifyFilter;
+        this.pendingIdentifyFilter = null;
+        this.toolRef.identifyFeaturesFilter(identifyFilter);
     };
     render() {
-        let resultWindow = null;
-        if (this.state.pendingRequests > 0 || this.state.identifyResults !== null) {
-            let body = null;
-            if (isEmpty(this.state.identifyResults)) {
-                if (this.state.pendingRequests > 0) {
-                    body = (<div className="identify-body" role="body"><span className="identify-body-message">{LocaleUtils.tr("identify.querying")}</span></div>);
-                } else {
-                    body = (<div className="identify-body" role="body"><span className="identify-body-message">{LocaleUtils.tr("identify.noresults")}</span></div>);
-                }
-            } else {
-                body = (
-                    <IdentifyViewer
-                        attributeCalculator={this.props.attributeCalculator}
-                        attributeTransform={this.props.attributeTransform}
-                        customExporters={this.props.customExporters}
-                        displayResultTree={this.props.displayResultTree}
-                        enableExport={this.props.enableExport}
-                        exportGeometry={this.props.exportGeometry}
-                        identifyResults={this.state.identifyResults}
-                        iframeDialogsInitiallyDocked={this.props.iframeDialogsInitiallyDocked}
-                        longAttributesDisplay={this.props.longAttributesDisplay}
-                        replaceImageUrls={this.props.replaceImageUrls}
-                        highlightAllResults={this.props.highlightAllResults}
-                        role="body" />
-                );
-            }
-            resultWindow = (
-                <ResizeableWindow dockable={this.props.geometry.side} icon="info-sign"
-                    initialHeight={this.props.geometry.initialHeight} initialWidth={this.props.geometry.initialWidth}
-                    initialX={this.props.geometry.initialX} initialY={this.props.geometry.initialY}
-                    initiallyDocked={this.props.geometry.initiallyDocked} key="IdentifyWindow"
-                    onClose={this.onWindowClose} title={LocaleUtils.trmsg("identify.title")}
-                >
-                    {body}
-                </ResizeableWindow>
-            );
-        }
-        return [resultWindow, (
-            <TaskBar key="IdentifyTaskBar" onHide={this.onToolClose} onShow={this.onShow} task="Identify">
-                {() => ({
-                    body: this.renderBody()
-                })}
-            </TaskBar>
-        )];
+        return (
+            <IdentifyTool
+                appendResultsByDefault={this.props.appendResultsByDefault}
+                availableRegionModes={this.props.availableRegionModes}
+                clearResultsOnClose={this.props.clearResultsOnClose}
+                currentSearchResult={this.props.identifySearchResults ? this.props.currentSearchResult : null}
+                enableAggregatedReports={this.props.enableAggregatedReports}
+                enableCompare={this.props.enableCompare}
+                enableExport={this.props.enableExport}
+                enabled={this.props.enabled}
+                exitTaskOnResultsClose={this.props.exitTaskOnResultsClose}
+                exportGeometry={this.props.exportGeometry}
+                geometry={this.props.geometry}
+                highlightAllResults={this.props.highlightAllResults}
+                initialRadiusUnits={this.props.initialRadiusUnits}
+                longAttributesDisplay={this.props.longAttributesDisplay}
+                onlyShowDialogWithResults={this.props.onlyShowDialogWithResults}
+                params={this.props.params}
+                replaceImageUrls={this.props.replaceImageUrls}
+                resultDisplayMode={this.props.resultDisplayMode}
+                resultGridSize={this.props.resultGridSize}
+                resultMultiDisplay={this.props.resultMultiDisplay}
+                selectionSerializeKeys={this.props.selectionSerializeKeys}
+                setToolRef={el => { this.toolRef = el; }}
+                showLayerSelector={this.props.showLayerSelector}
+                showLayerTitles={this.props.showLayerTitles}
+                showZoomToResults={this.props.showZoomToResults}
+                skipEmptyFeatureAttributes={this.props.skipEmptyFeatureAttributes}
+                taskId="Identify"
+                toolIcon="info-sign"
+                toolTitle={LocaleUtils.tr("identify.title")}
+            />
+        );
     }
 }
 
-const selector = (state) => ({
-    click: state.map.click || {modifiers: {}},
-    currentTask: state.task.id,
-    currentIdentifyTool: state.identify.tool,
-    layers: state.layers.flat,
-    map: state.map,
-    selection: state.selection
-});
-
-export default connect(selector, {
-    addLayerFeatures: addLayerFeatures,
-    addMarker: addMarker,
-    changeSelectionState: changeSelectionState,
-    removeMarker: removeMarker,
-    removeLayer: removeLayer,
-    setCurrentTask: setCurrentTask
-})(Identify);
+export default connect((state) => {
+    const enabled = state.task.id === "Identify" || (
+        (!state.task.id || state.task.identifyEnabled) &&
+        ConfigUtils.getConfigProp("identifyTool", state.theme.current, "Identify") === "Identify"
+    );
+    return {
+        currentSearchResult: state.search.currentResult,
+        enabled: enabled,
+        layerFilter: state.layers.filter,
+        theme: state.theme.current,
+        startupParams: state.localConfig.startupParams
+    };
+}, {})(Identify);

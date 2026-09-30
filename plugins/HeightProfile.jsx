@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,12 +7,11 @@
  */
 
 import React from 'react';
-import axios from 'axios';
-import PropTypes from 'prop-types';
-import {connect} from 'react-redux';
-import ReactDOM from 'react-dom';
-import isEmpty from 'lodash.isempty';
 import {Line} from "react-chartjs-2";
+import ReactDOM from 'react-dom';
+import {connect} from 'react-redux';
+
+import axios from 'axios';
 import {
     Chart as ChartJS,
     CategoryScale,
@@ -25,13 +24,20 @@ import {
     BubbleController
 } from 'chart.js';
 import FileSaver from 'file-saver';
+import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import {addMarker, removeMarker} from '../actions/layers';
 import {changeMeasurementState} from '../actions/measurement';
+import Icon from '../components/Icon';
 import ResizeableWindow from '../components/ResizeableWindow';
-import Spinner from '../components/Spinner';
-import ConfigUtils from '../utils/ConfigUtils';
+import Spinner from '../components/widgets/Spinner';
+import CoordinatesUtils from '../utils/CoordinatesUtils';
+import {getElevationInterface} from '../utils/ElevationInterface';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MapUtils from '../utils/MapUtils';
 import MeasureUtils from '../utils/MeasureUtils';
 import MiscUtils from '../utils/MiscUtils';
 import VectorLayerUtils from '../utils/VectorLayerUtils';
@@ -67,21 +73,20 @@ class HeightProfilePrintDialog_ extends React.PureComponent {
         this.imageEl = null;
     }
     state = {
-        initialized: false
+        initialized: false,
+        imageUrl: ''
     };
     componentDidMount() {
-        let templatePath = this.props.templatePath;
-        if (templatePath.startsWith(":/")) {
-            const assetsPath = ConfigUtils.getAssetsPath();
-            templatePath = assetsPath + templatePath.substr(1);
-        }
+        const templatePath = MiscUtils.resolveAssetsPath(this.props.templatePath);
         this.externalWindow = window.open(templatePath, LocaleUtils.tr("heightprofile.title"), "toolbar=no, location=no, directories=no, status=no, menubar=no, scrollbars=yes, resizable=yes");
+        // Inherit API
+        this.externalWindow.qwc2 = window.qwc2;
         this.externalWindow.addEventListener('load', this.setWindowContent, false);
         this.externalWindow.addEventListener('resize', this.windowResized, false);
         window.addEventListener('beforeunload', this.closePrintWindow);
     }
     componentDidUpdate(prevProps, prevState) {
-        if (this.props.layers !== prevProps.layers || this.props.map !== prevProps.map || (this.state.initialized && !prevState.initialized)) {
+        if (this.props.layers !== prevProps.layers || this.props.map.bbox !== prevProps.map.bbox || (this.state.initialized && !prevState.initialized)) {
             this.refreshImage();
         }
     }
@@ -91,7 +96,7 @@ class HeightProfilePrintDialog_ extends React.PureComponent {
     }
     closePrintWindow = () => {
         this.externalWindow.close();
-    }
+    };
     setWindowContent = () => {
         this.externalWindow.addEventListener('beforeunload', this.props.onClose, false);
         const container = this.externalWindow.document.getElementById("heightprofilecontainer");
@@ -105,6 +110,7 @@ class HeightProfilePrintDialog_ extends React.PureComponent {
 
             this.imageEl = this.externalWindow.document.createElement('div');
             this.imageEl.id = 'map';
+            this.imageEl.innerHTML = LocaleUtils.tr("heightprofile.loadingimage");
             container.appendChild(this.imageEl);
 
             this.portalEl = this.externalWindow.document.createElement('div');
@@ -118,33 +124,101 @@ class HeightProfilePrintDialog_ extends React.PureComponent {
         }
     };
     refreshImage = () => {
-        const geom = {
-            coordinates: this.props.measurement.coordinates,
-            type: 'LineString'
+        const measurement = this.props.measurement;
+        const layer = {
+            type: 'vector',
+            opacity: 255,
+            features: [
+                ...measurement.coordinates.map(coord => ({
+                    type: 'Feature',
+                    geometry: {
+                        coordinates: coord,
+                        type: 'Point'
+                    },
+                    styleOptions: {
+                        fillColor: [255, 255, 255, 1],
+                        strokeColor: [255, 0, 0, 1],
+                        strokeWidth: 2,
+                        circleRadius: 6,
+                        strokeDash: []
+                    }
+                })),
+                {
+                    type: 'Feature',
+                    geometry: {
+                        coordinates: measurement.coordinates,
+                        type: 'LineString'
+                    },
+                    styleOptions: {
+                        strokeColor: [255, 0, 0, 1],
+                        strokeWidth: 4,
+                        strokeDash: [],
+                        headmarker: this.props.measurement.lineHeadMarker,
+                        tailmarker: this.props.measurement.lineTailMarker,
+                        markerscale: this.props.measurement.markerScale
+                    },
+                    properties: {
+                        segment_labels: measurement.segment_lengths.map(length => MeasureUtils.formatMeasurement(length, false, measurement.lenUnit))
+                    }
+                }
+            ]
         };
-        const styleOptions = {
-            strokeColor: [255, 0, 0, 1],
-            strokeWidth: 4
-        };
-
-        const exportParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, this.state.scale, this.props.map.projection, true, false);
+        const mapCrs = this.props.map.projection;
+        const scale = Math.round(MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom));
+        const exportParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, scale, mapCrs, true, false);
+        const highlightParams = VectorLayerUtils.createPrintHighlighParams([layer], mapCrs, scale);
+        let bounds = [...this.props.map.bbox.bounds];
+        if (CoordinatesUtils.getAxisOrder(this.props.map.projection).substr(0, 2) === 'ne') {
+            bounds = [bounds[1], bounds[0], bounds[3], bounds[2]];
+        }
         const imageParams = {
             SERVICE: 'WMS',
             VERSION: '1.3.0',
             REQUEST: 'GetMap',
             TRANSPARENT: 'true',
             TILED: 'false',
+            filename: 'heightprofile.png', // To make the ogc-service treat this as a raster export
             CRS: this.props.map.projection,
-            BBOX: this.props.map.bbox.bounds,
+            BBOX: bounds,
             WIDTH: this.props.map.size.width,
             HEIGHT: this.props.map.size.height,
-            HIGHLIGHT_GEOM: VectorLayerUtils.geoJSONGeomToWkt(geom, this.props.map.projection === "EPSG:4326" ? 4 : 2),
-            HIGHLIGHT_SYMBOL: VectorLayerUtils.createSld('LineString', 'default', styleOptions, 255),
+            HIGHLIGHT_GEOM: highlightParams.geoms.join(";"),
+            HIGHLIGHT_SYMBOL: highlightParams.styles.join(";"),
+            HIGHLIGHT_LABELSTRING: highlightParams.labels.join(";"),
+            HIGHLIGHT_LABELCOLOR: highlightParams.labelFillColors.join(";"),
+            HIGHLIGHT_LABELBUFFERCOLOR: highlightParams.labelOutlineColors.join(";"),
+            HIGHLIGHT_LABELBUFFERSIZE: highlightParams.labelOutlineSizes.join(";"),
+            HIGHLIGHT_LABELSIZE: highlightParams.labelSizes.join(";"),
+            HIGHLIGHT_LABEL_DISTANCE: highlightParams.labelDist.join(";"),
+            HIGHLIGHT_LABEL_ROTATION: highlightParams.labelRotations.join(";"),
+            HIGHLIGHT_LABELFRAMEBACKGROUNDCOLOR: highlightParams.labelFrameColors.join(";"),
+            HIGHLIGHT_LABELFRAMEOUTLINECOLOR: highlightParams.labelFrameOutlines.join(";"),
+            HIGHLIGHT_LABELFRAMESIZE: highlightParams.labelFrameSizes.join(";"),
+            HIGHLIGHT_LABELFRAMEOUTLINEWIDTH: highlightParams.labelFrameOutlineWidths.join(";"),
             csrf_token: MiscUtils.getCsrfToken(),
             ...exportParams
         };
-        const url = this.props.theme.url.split("?")[0] + "?" + Object.entries(imageParams).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-        this.imageEl.innerHTML = `<img src="${url}" style="width: 100%" />`;
+        const baseUrl = this.props.theme.url.split("?")[0];
+        const query = Object.entries(imageParams).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+        const src = baseUrl + "?" + query;
+        if (src === this.state.imageUrl) {
+            return;
+        }
+        this.setState({imageUrl: src});
+        const options = {
+            headers: {'content-type': 'application/x-www-form-urlencoded'},
+            responseType: "blob"
+        };
+        axios.post(baseUrl, query, options).then(response => {
+            const reader = new FileReader();
+            reader.readAsDataURL(response.data);
+            reader.onload = () => {
+                this.imageEl.innerHTML = `<img src="${reader.result}" style="width: 100%" />`;
+            };
+        }).catch(() => {
+            // Fall back to GET
+            this.imageEl.innerHTML = `<img src="${src}" style="width: 100%" />`;
+        });
     };
     windowResized = () => {
         if (this.chart) {
@@ -171,7 +245,9 @@ const HeightProfilePrintDialog = connect((state) => ({
  *
  * Triggered automatically when a line is measured via the `Measure` plugin.
  *
- * Requires `elevationServiceUrl` in `config.json` to point to a `qwc-elevation-service`.
+ * Requires `elevationServiceUrl` in `config.json` to point to a `qwc-elevation-service`,
+ * or a custom elevation interface to be exposed in `window.QWC2ElevationInterface`, see
+ * [ElevationInterface.js](https://github.com/qgis/qwc2/blob/master/utils/ElevationInterface.js).
  *
  * The print height profile functionality requires a template located by default at `assets/templates/heightprofileprint.html`
  * with containing a container element with `id=heightprofilecontainer`.
@@ -185,7 +261,6 @@ class HeightProfile extends React.Component {
         /** The precision of displayed and exported values (0: no decimals, 1: 1 decimal position, etc). */
         heightProfilePrecision: PropTypes.number,
         measurement: PropTypes.object,
-        mobile: PropTypes.bool,
         projection: PropTypes.string,
         removeMarker: PropTypes.func,
         /** The number of elevation samples to query. */
@@ -201,7 +276,8 @@ class HeightProfile extends React.Component {
     };
     state = {
         data: {},
-        isloading: false,
+        selectedDatasetIndices: [0],
+        reqId: null,
         drawnodes: true,
         printdialog: false
     };
@@ -211,32 +287,43 @@ class HeightProfile extends React.Component {
         this.profilePrintWindow = null;
     }
     componentDidUpdate(prevProps) {
-        if (this.props.measurement.coordinates !== prevProps.measurement.coordinates) {
-            if (this.props.measurement.drawing === false && this.props.measurement.geomType === "LineString" && !isEmpty(this.props.measurement.coordinates) ) {
-                this.queryElevations(this.props.measurement.coordinates, this.props.measurement.segment_lengths, this.props.projection);
-            } else if (!isEmpty(this.state.data)) {
-                this.setState({data: {}});
-                this.props.changeMeasurementState({...this.props.measurement, pickPositionCallback: null});
-            }
+        const measureIdChanged = this.props.measurement.measureId !== prevProps.measurement.measureId;
+        const coordsChanged = this.props.measurement.coordinates !== prevProps.measurement.coordinates;
+        if (this.props.measurement.mode === 'LineString' && !this.props.measurement.drawing && (measureIdChanged || coordsChanged) && !isEmpty(this.props.measurement.coordinates)) {
+            this.queryElevations(this.props.measurement.coordinates, this.props.measurement.segment_lengths, this.props.projection);
+        } else if (!isEmpty(this.state.data) && measureIdChanged) {
+            this.setState({data: {}});
+            this.props.changeMeasurementState({pickPositionCallback: null});
         }
     }
+    componentWillUnmount() {
+        this.clearMarkerAndTooltip();
+    }
     queryElevations(coordinates, distances, projection) {
-        const serviceUrl = (ConfigUtils.getConfigProp("elevationServiceUrl") || "").replace(/\/$/, '');
+        const reqId = uuidv4();
+        this.setState({reqId: reqId});
         const totLength = this.props.measurement.length;
-        if (serviceUrl) {
-            this.setState({ isloading: true });
-            axios.post(serviceUrl + '/getheightprofile', {coordinates, distances, projection, samples: this.props.samples}).then(response => {
-                if (this.state.isloading !== true) {
-                    // Since aborted
-                    return;
-                }
+        getElevationInterface().getProfile(coordinates, distances, projection, this.props.samples).then(response => {
+            // Request changed
+            if (this.state.reqId !== reqId) {
+                return;
+            }
+
+            let elevationsList = response.list;
+            if (!elevationsList) {
+                elevationsList = [{elevations: response, dataset: null}];
+            }
+
+            const data = elevationsList.map((entry, index) => {
+                const elevations = entry.elevations;
+
                 // Compute x-axis distances and get node points
                 const nodes = [];
                 let cumDist = distances[0];
                 let distIdx = 0;
-                const y = response.data.elevations;
-                const x = y.map((entry, idx, a) => {
-                    const dist = (idx / (a.length - 1) * totLength).toFixed(0);
+                const y = elevations;
+                const x = y.map((value, idx, a) => {
+                    const dist = (idx / (a.length - 1) * totLength);
                     if (dist >= cumDist) {
                         nodes.push({x: dist, y: y[idx]});
                         cumDist += distances[++distIdx];
@@ -246,40 +333,54 @@ class HeightProfile extends React.Component {
                 // First and last node
                 nodes.unshift({x: x[0], y: y[0]});
                 nodes.push({x: x[x.length - 1], y: y[y.length - 1]});
+                const nonZeroElevations = elevations.filter(elev => elev !== 0);
 
-                const data = {
-                    x: x,
-                    y: response.data.elevations,
-                    maxY: Math.max(...response.data.elevations),
-                    totLength: totLength,
-                    nodes: nodes
-                };
-                this.setState({isloading: false, data: data});
-                this.props.changeMeasurementState({...this.props.measurement, pickPositionCallback: this.pickPositionCallback});
-            }).catch(e => {
-                this.setState({isloading: false, data: {error: String(e)}});
-                // eslint-disable-next-line
-                console.log("Query failed: " + e);
-            });
-        }
+                if (nonZeroElevations.length > 0) {
+                    return {
+                        dataset: entry.dataset || `${LocaleUtils.tr("heightprofile.dhmdefaultname")} ${index + 1}`,
+                        x: x,
+                        y: elevations,
+                        maxY: Math.max(...elevations),
+                        minY: Math.min(...nonZeroElevations),
+                        totLength: totLength,
+                        nodes: nodes
+                    };
+                }
+                return null;
+            }).filter(entry => entry !== null );
+
+            this.setState((prevState) => ({
+                reqId: null, data: data,
+                selectedDatasetIndices: prevState.selectedDatasetIndices.filter(i => i < data.length) ? prevState.selectedDatasetIndices : [0]
+            }));
+            this.props.changeMeasurementState({pickPositionCallback: this.pickPositionCallback});
+        }).catch((error) => {
+            this.setState({reqId: null, data: error ? {error} : {}});
+        });
     }
     onClose = () => {
         this.setState({data: {}, isloading: false});
-        this.props.changeMeasurementState({...this.props.measurement, pickPositionCallback: null});
+        this.props.changeMeasurementState({pickPositionCallback: null});
     };
     render() {
         if (isEmpty(this.state.data) && !this.state.isloading) {
             return null;
         }
         const extraControls = [
-            {icon: 'circle', active: this.state.drawnodes, callback: () => this.setState(state => ({drawnodes: !state.drawnodes})), msgid: LocaleUtils.trmsg("heightprofile.drawnodes")},
-            {icon: 'export', callback: this.exportProfile, msgid: LocaleUtils.trmsg("heightprofile.export")},
-            {icon: 'print', active: this.state.printdialog, callback: () => this.setState(state => ({printdialog: !state.printdialog})), msgid: LocaleUtils.trmsg("heightprofile.print")}
+            {icon: 'circle', active: this.state.drawnodes, callback: () => this.setState(state => ({drawnodes: !state.drawnodes})), title: LocaleUtils.tr("heightprofile.drawnodes")},
+            {icon: 'export', callback: this.exportProfile, title: LocaleUtils.tr("heightprofile.export")},
+            {icon: 'print', active: this.state.printdialog, callback: () => this.setState(state => ({printdialog: !state.printdialog})), title: LocaleUtils.tr("heightprofile.print")}
         ];
         return [(
-            <ResizeableWindow dockable="bottom" extraControls={extraControls} icon="line" initialHeight={this.props.height} initialWidth={600} initiallyDocked key="ProfileDialog" onClose={this.onClose} splitScreenWhenDocked title={LocaleUtils.tr("heightprofile.title")}>
+            <ResizeableWindow
+                dockable="bottom" extraControls={extraControls} icon="line"
+                initialHeight={this.props.height} initialWidth={600} initiallyDocked
+                key="ProfileDialog" onClose={this.onClose} onExternalWindowResized={this.resizeChart}
+                splitScreenWhenDocked
+                title={LocaleUtils.tr("heightprofile.title")} usePortal={false}
+            >
                 {this.state.isloading ? (
-                    <div className="height-profile-loading-indicator" role="body">
+                    <div className="height-profile-loading-indicator">
                         <Spinner className="spinner" /> {LocaleUtils.tr("heightprofile.loading")}
                     </div>
                 ) : this.renderHeightProfile((el) => { this.chart = el; }, true)}
@@ -292,12 +393,9 @@ class HeightProfile extends React.Component {
         ) : null];
     }
     renderHeightProfile = (saveRef, interactive) => {
-        if (this.props.measurement.drawing ) {
-            return null;
-        }
         if (this.state.data.error) {
             return (
-                <div className="height-profile-error" role="body">
+                <div className="height-profile-error">
                     {LocaleUtils.tr("heightprofile.error") + ": " + this.state.data.error}
                 </div>
             );
@@ -306,11 +404,12 @@ class HeightProfile extends React.Component {
         const heightStr = LocaleUtils.tr("heightprofile.height");
         const aslStr = LocaleUtils.tr("heightprofile.asl");
 
-        const data = {
-            labels: this.state.data.x,
-            datasets: [
+        const { selectedDatasetIndices = [] } = this.state;
+        const datasets = selectedDatasetIndices.flatMap((idx) => {
+            return [
                 {
-                    data: this.state.data.y,
+                    label: this.state.data[idx].dataset,
+                    data: this.state.data[idx].y.map((y, i) => ({ x: this.state.data[idx].x[i], y })),
                     fill: true,
                     backgroundColor: "rgba(255,0,0,0.5)",
                     borderColor: "rgb(255,0,0)",
@@ -320,7 +419,7 @@ class HeightProfile extends React.Component {
                 },
                 {
                     type: 'bubble',
-                    data: this.state.data.nodes,
+                    data: this.state.data[idx].nodes,
                     backgroundColor: 'rgb(255, 255, 255)',
                     borderColor: 'rgb(255, 0, 0)',
                     borderWidth: 2,
@@ -329,12 +428,18 @@ class HeightProfile extends React.Component {
                     hoverBorderWidth: 2,
                     order: 0,
                     hidden: !this.state.drawnodes
-                }
-            ]
+                }];
+        });
+
+        const data = {
+            labels: this.state.data[0].x, // X-axis labels are all the same
+            datasets: datasets
         };
+        const sampleDataset = this.state.data[this.state.selectedDatasetIndices[0] ?? 0]; // first selected dataset for chart scale etc.
+
         // Approx 10 ticks
-        const stepSizeFact = Math.pow(10, Math.ceil(Math.log10(this.state.data.totLength / 10)));
-        const stepSize = Math.round(this.state.data.totLength / (stepSizeFact)) * stepSizeFact / 10;
+        const stepSizeFact = Math.pow(10, Math.ceil(Math.log10(sampleDataset.totLength / 10)));
+        const stepSize = Math.round(sampleDataset.totLength / (stepSizeFact)) * stepSizeFact / 10;
         const prec = this.props.heightProfilePrecision;
         const options = {
             responsive: true,
@@ -352,8 +457,11 @@ class HeightProfile extends React.Component {
                     displayColors: false,
                     bodyFont: {weight: 'bold'},
                     callbacks: {
-                        title: (ctx) => (distanceStr + ": " + MeasureUtils.formatMeasurement(ctx[0].parsed.x, false, 'metric', 2)),
-                        label: (ctx) => (heightStr + ": " + ctx.parsed.y.toFixed(prec) + " m " + aslStr)
+                        title: (ctx) => (distanceStr + ": " + MeasureUtils.formatMeasurement(ctx[0].parsed.x, false, 'metric')),
+                        label: (ctx) => (
+                            this.state.data.length > 1
+                                ? `${heightStr} (${ctx.dataset.label}): ${ctx.parsed.y.toFixed(prec)} m ${aslStr}`
+                                : `${heightStr}: ${ctx.parsed.y.toFixed(prec)} m ${aslStr}`)
                     }
                 }
             },
@@ -370,7 +478,7 @@ class HeightProfile extends React.Component {
                         text: distanceStr + " [m]",
                         padding: 0
                     },
-                    max: Math.ceil(this.state.data.totLength)
+                    max: Math.ceil(sampleDataset.totLength)
                 },
                 y: {
                     ticks: {
@@ -381,21 +489,53 @@ class HeightProfile extends React.Component {
                         display: true,
                         text: heightStr + " [m " + aslStr + "]"
                     },
-                    max: Math.ceil(this.state.data.maxY)
+                    max: Math.ceil(Math.max(...selectedDatasetIndices.map(idx => this.state.data[idx]?.maxY))),
+                    min: Math.floor(Math.min(...selectedDatasetIndices.map(idx => this.state.data[idx]?.minY)))
                 }
             },
             onHover: interactive ? (evt, activeEls, chart) => {
                 const chartArea = chart.chartArea;
                 const chartX = Math.min(Math.max(evt.x - chartArea.left), chartArea.width);
-                this.updateMarker(chartX / chartArea.width * this.state.data.totLength);
+                this.updateMarker(chartX / chartArea.width * sampleDataset.totLength);
             } : undefined
         };
 
+        let datasetSelector = null;
+        if (interactive && this.state.data.length > 1) {
+            datasetSelector = (
+                <div className="height-profile-dataset-select">
+                    {this.state.data.map((dataset, idx) => {
+                        const isSelected = this.state.selectedDatasetIndices?.includes(idx);
+                        return (
+                            <div key={`${dataset.dataset}-${idx}`} >
+                                <Icon icon={isSelected ? "checked" : "unchecked"}  onClick={() => {
+                                    const selected = new Set(this.state.selectedDatasetIndices || []);
+                                    if (isSelected) {
+                                        selected.delete(idx);
+                                    } else {
+                                        selected.add(idx);
+                                    }
+                                    this.setState({ selectedDatasetIndices: Array.from(selected) });
+                                }}
+                                />
+                                <span>{dataset.dataset}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
         return (
-            <div className="height-profile-chart-container" role="body" style={{position: 'relative'}}>
-                <Line data={data} options={options} ref={saveRef} />
+            <div className="height-profile-chart-container" onMouseLeave={this.clearMarkerAndTooltip} style={{position: 'relative'}}>
+                {datasetSelector}
+                <Line data={data} options={options} ref={saveRef}/>
             </div>
         );
+    };
+    resizeChart = () => {
+        if (this.chart) {
+            this.chart.resize();
+        }
     };
     updateMarker = (x) => {
         const segmentLengths = this.props.measurement.segment_lengths;
@@ -420,16 +560,19 @@ class HeightProfile extends React.Component {
             return;
         }
         const chartArea = this.chart.chartArea;
-        this.chart.tooltip.setActiveElements([
-            {
-                datasetIndex: 0,
+        const activeElements = this.chart.data.datasets
+            .map((ds, i) => ({ ds, i }))
+            .filter(({ ds }) => ds.type !== 'bubble')
+            .map(({ i }) => ({
+                datasetIndex: i,
                 index: idx
-            }
-        ],
-        {
-            x: (chartArea.left + chartArea.right) / 2,
-            y: (chartArea.top + chartArea.bottom) / 2
-        });
+            }));
+        this.chart.tooltip.setActiveElements(
+            activeElements,
+            {
+                x: (chartArea.left + chartArea.right) / 2,
+                y: (chartArea.top + chartArea.bottom) / 2
+            });
         this.chart.update();
     };
     clearMarkerAndTooltip = () => {
@@ -439,10 +582,12 @@ class HeightProfile extends React.Component {
         }
     };
     pickPositionCallback = (pos) => {
-        if (!pos || !this.state.data) {
+        if (!pos || isEmpty(this.state.data)) {
             this.clearMarkerAndTooltip();
             return;
         }
+        const data = this.state.data[this.state.selectedDatasetIndices[0] ?? 0];
+
         // Find sample index
         const segmentLengths = this.props.measurement.segment_lengths;
         const coo = this.props.measurement.coordinates;
@@ -456,8 +601,8 @@ class HeightProfile extends React.Component {
                 x += segmentLengths[iSegment];
             }
         }
-        const k = Math.min(1, x / this.state.data.totLength);
-        const idx = Math.min(this.state.data.y.length - 1, Math.floor(k * this.props.samples));
+        const k = Math.min(1, x / data.totLength);
+        const idx = Math.min(data.y.length - 1, Math.floor(k * this.props.samples));
         this.showTooltip(idx);
     };
     pointOnSegment = (q, p1, p2) => {
@@ -475,28 +620,34 @@ class HeightProfile extends React.Component {
         }
     };
     exportProfile = () => {
-        if (!this.state.data.x) {
-            return;
-        }
-        let csv = "";
-        csv += "index" + "\t" + "distance" + "\t" + "elevation" + "\n";
-        this.state.data.x.forEach((x, idx) => {
-            const sample = {x: x, y: this.state.data.y[idx]};
-            const prec = this.props.heightProfilePrecision;
-            const distance = Math.round(sample.x * Math.pow(10, prec)) / Math.pow(10, prec);
-            const height = Math.round(sample.y * Math.pow(10, prec)) / Math.pow(10, prec);
-            csv += String(idx).replace('"', '""') + "\t"
-                + String(distance) + "\t"
-                + String(height) + "\n";
+        // const data = this.state.data[this.state.selectedDatasetIndex];
+
+        this.state.selectedDatasetIndices.forEach(index => {
+            const data = this.state.data[index];
+            if (!data.x) {
+                return;
+            }
+            let csv = "";
+            csv += "index" + "\t" + "distance" + "\t" + "elevation" + "\n";
+            data.x.forEach((x, idx) => {
+                const sample = {x: x, y: data.y[idx]};
+                const prec = this.props.heightProfilePrecision;
+                const distance = Math.round(sample.x * Math.pow(10, prec)) / Math.pow(10, prec);
+                const height = Math.round(sample.y * Math.pow(10, prec)) / Math.pow(10, prec);
+                csv += String(idx).replace('"', '""') + "\t"
+                    + String(distance) + "\t"
+                    + String(height) + "\n";
+            });
+            FileSaver.saveAs(new Blob([csv], {type: "text/plain;charset=utf-8"}),
+                this.state.data.length > 1 ? `heightprofile-${data.dataset}.csv`
+                    : `heightprofile.csv`);
         });
-        FileSaver.saveAs(new Blob([csv], {type: "text/plain;charset=utf-8"}), "heightprofile.csv");
     };
 }
 
 export default connect((state) => ({
     measurement: state.measurement,
-    projection: state.map.projection,
-    mobile: state.browser.mobile
+    projection: state.map.projection
 }), {
     addMarker: addMarker,
     changeMeasurementState: changeMeasurementState,

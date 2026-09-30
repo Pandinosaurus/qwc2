@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,94 +7,161 @@
  */
 
 import React from 'react';
+
+import classNames from 'classnames';
+import isEmpty from 'lodash.isempty';
 import PropTypes from 'prop-types';
-import Icon from '../Icon';
-import InputContainer from '../InputContainer';
+
 import MiscUtils from '../../utils/MiscUtils';
+import Icon from '../Icon';
+import InputContainer from './InputContainer';
+import PopupMenu from './PopupMenu';
 
 import './style/EditableSelect.css';
 
 export default class EditableSelect extends React.Component {
     static propTypes = {
+        className: PropTypes.string,
+        name: PropTypes.string,
         onChange: PropTypes.func,
         onSubmit: PropTypes.func,
         options: PropTypes.array,
         placeholder: PropTypes.string,
-        readOnly: PropTypes.bool
-    };
-    static defaultProps = {
-        onSubmit: () => {}
+        readOnly: PropTypes.bool,
+        value: PropTypes.oneOfType([PropTypes.string, PropTypes.number])
     };
     state = {
-        textValue: "",
+        propValue: "",
+        value: "",
+        manualInput: false,
         selectedOption: null,
-        focused: false
+        focused: false,
+        popup: false
     };
+    constructor(props) {
+        super(props);
+        this.el = null;
+    }
+    static getDerivedStateFromProps(nextProps, state) {
+        if (state.focused) {
+            // No changes while focussed
+            return null;
+        }
+        const value = String(nextProps.value ?? "");
+        if (value !== state.propValue) {
+            const selectedOption = nextProps.options.find(option => EditableSelect.optionValue(option) === value) ?? null;
+            return {
+                propValue: value,
+                value: value,
+                manualInput: false,
+                selectedOption: selectedOption
+            };
+        }
+        return null;
+    }
+    static optionLabel(option) {
+        return typeof option === 'object' ? option.label : String(option);
+    }
+    static optionValue(option) {
+        return typeof option === 'object' ? option.value : String(option);
+    }
+    componentDidUpdate(prevProps, prevState) {
+        if (this.state.value !== prevState.value && !this.state.manualInput && document.activeElement === this.el) {
+            this.el.select();
+        } else if (!this.state.value && this.state.manualInput) {
+            this.setState({manualInput: false, popup: true});
+        }
+    }
     render() {
+        const classes = classNames({
+            EditableSelect: true,
+            [this.props.className]: true
+        });
         return (
-            <div className="EditableSelect">
+            <div className={classes}>
                 <InputContainer className="editable-select-inputcontainer">
                     <input
-                        onBlur={() => this.setState({focused: false})}
+                        autoComplete="off"
+                        name={this.props.name}
+                        onBlur={this.onBlur}
                         onChange={this.valueChanged}
-                        onClick={() => this.setState({focused: true})}
-                        onKeyPress={this.onKeyPress}
-                        placeholder={this.state.selectedOption ? "" : this.props.placeholder}
+                        onClick={this.onClick}
+                        onFocus={this.onFocus}
+                        onKeyDown={this.onKeyDown}
+                        placeholder={this.props.placeholder}
                         readOnly={this.props.readOnly}
-                        ref={el => { this.input = el; }}
+                        ref={el => { this.el = el; }}
                         role="input"
                         type="text"
-                        value={this.state.textValue} />
+                        value={this.state.value} />
                     <Icon icon="clear" onClick={this.clear} role="suffix" />
                 </InputContainer>
-                {this.state.selectedOption !== null ? this.renderSelectedOption() : null}
-                {this.state.focused && !this.props.readOnly ? this.renderOptions() : null}
+                {this.state.selectedOption ? this.renderSelectedOption() : null}
+                {this.el && this.state.popup && !this.props.readOnly ? this.renderOptions() : null}
             </div>
         );
     }
-    optionLabel = (option) => {
-        return typeof option === 'string' ? option : option.label;
-    };
-    optionValue = (option) => {
-        return typeof option === 'string' ? option : option.value;
-    };
     renderOptions = () => {
-        return (
-            <div className="editable-select-dropdown">
-                {this.props.options.map((option, idx) => {
-                    const label = this.optionLabel(option);
-                    if (this.state.textValue && !label.toLowerCase().startsWith(this.state.textValue.toLowerCase())) {
-                        return null;
-                    }
-                    return (
-                        <div key={"opt" + idx} onClick={() => this.optionSelected(option)} onMouseDown={MiscUtils.killEvent}>{this.optionLabel(option)}</div>
-                    );
-                })}
-            </div>
-        );
+        const lvalue = this.state.value.toLowerCase();
+        const options = this.props.options.map((option, idx) => {
+            const label = EditableSelect.optionLabel(option);
+            if (this.state.manualInput && lvalue && !label.toLowerCase().includes(lvalue)) {
+                return null;
+            }
+            return (
+                <div key={"opt" + idx} onClick={() => this.optionSelected(option)} onMouseDown={MiscUtils.killEvent} title={label}>{label}</div>
+            );
+        }).filter(Boolean);
+        return !isEmpty(options) ? (
+            <PopupMenu anchor={this.el} className="editable-select-dropdown" onClose={() => this.setState({popup: false})} spaceKeyActivation={false}>
+                {options}
+            </PopupMenu>
+        ) : null;
     };
     renderSelectedOption = () => {
+        const label = EditableSelect.optionLabel(this.state.selectedOption);
         return (
-            <div className="editable-select-selopt">
-                <span>{this.optionLabel(this.state.selectedOption)}</span>
+            <div className="editable-select-selopt" onClick={() => this.setState({popup: true})} title={label}>
+                {label}
             </div>
         );
     };
     valueChanged = (ev) => {
-        this.setState({textValue: ev.target.value, selectedOption: null});
-        this.props.onChange(ev.target.value.trim());
+        this.setState({value: ev.target.value, selectedOption: null, manualInput: true});
     };
     optionSelected = (option) => {
-        this.setState({textValue: "", selectedOption: option, focused: false});
-        this.props.onChange(this.optionValue(option.value));
+        const value = EditableSelect.optionValue(option);
+        this.props.onChange(value);
+        this.setState({selectedOption: option, popup: false, value: value});
     };
     clear = () => {
-        this.setState({textValue: "", selectedOption: null, focused: false});
-        this.props.onChange("");
+        if (!this.props.readOnly) {
+            this.props.onChange("");
+        }
     };
-    onKeyPress = (ev) => {
-        if (!ev.target.readOnly && ev.key === 'Enter') {
-            this.props.onSubmit();
+    onClick = (ev) => {
+        if (!this.state.manualInput) {
+            ev.target.select();
+            this.setState({popup: true});
+        }
+    };
+    onFocus = (ev) => {
+        ev.target.select();
+        this.setState({focused: true, manualInput: false});
+    };
+    onBlur = () => {
+        if (!this.props.readOnly) {
+            this.props.onChange(this.state.value.trim());
+            this.setState({focused: false});
+        }
+    };
+    onKeyDown = (ev) => {
+        if (!this.props.readOnly && ev.key === 'Enter') {
+            this.props.onChange(this.state.value.trim());
+            MiscUtils.killEvent(ev);
+            if (this.props.onSubmit) {
+                this.props.onSubmit(this.state.value.trim());
+            }
         }
     };
 }

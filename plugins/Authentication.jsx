@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,11 +7,17 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+import ReactDOM from 'react-dom';
 import {connect} from 'react-redux';
-import url from 'url';
-import ConfigUtils from '../utils/ConfigUtils';
 
+import PropTypes from 'prop-types';
+
+import Icon from '../components/Icon';
+import {AppInfosPortalContext} from '../components/PluginsContainer';
+import ConfigUtils from '../utils/ConfigUtils';
+import MiscUtils from '../utils/MiscUtils';
+
+import './style/Authentication.css';
 
 /**
  * Handles authentication
@@ -19,6 +25,9 @@ import ConfigUtils from '../utils/ConfigUtils';
  * Invokes the the authentication service specified by `authServiceUrl` in `config.json`.
  */
 class Authentication extends React.Component {
+    static contextType = AppInfosPortalContext;
+    static availableIn3D = true;
+
     static propTypes = {
         /** Whether to clear the layer parameter from the URL on login. */
         clearLayerParam: PropTypes.bool,
@@ -28,7 +37,9 @@ class Authentication extends React.Component {
         logoutTargetUrl: PropTypes.string,
         /** Whether authentication is required, i.e. the viewer automatically redirects to the login page if no user is authenticated. */
         requireLogin: PropTypes.bool,
-        task: PropTypes.string
+        /** Whether to display the currently logged in user below the application menu button. */
+        showLoginUser: PropTypes.bool,
+        task: PropTypes.object
     };
     constructor(props) {
         super(props);
@@ -36,9 +47,6 @@ class Authentication extends React.Component {
     }
     componentDidMount() {
         const username = ConfigUtils.getConfigProp("username");
-        if (this.props.requireLogin && !username) {
-            this.showLogin();
-        }
         if (this.props.idleTimeout && username) {
             this.idleTimer = setTimeout(this.idleAutologout, this.props.idleTimeout * 1000);
             window.addEventListener('keydown', this.resetIdleTimer, {passive: true});
@@ -47,22 +55,19 @@ class Authentication extends React.Component {
         }
     }
     componentDidUpdate(prevProps) {
-        if (this.props.task !== prevProps.task) {
-            if (this.props.task === "Login") {
+        const task = this.props.task;
+        if (task !== prevProps.task) {
+            // "Login" and "Logout" task ids are legacy
+            if (task.id === "Login" || (task.id === "Authentication" && task.mode === "Login")) {
                 this.showLogin();
-            } else if (this.props.task === "Logout") {
+            } else if (task.id === "Logout" || (task.id === "Authentication" && task.mode === "Logout")) {
                 // logout and redirect to custom logoutTargetUrl or current location if not set
                 window.location.href = ConfigUtils.getConfigProp("authServiceUrl") + "logout?url=" + encodeURIComponent(this.props.logoutTargetUrl || window.location.href);
             }
         }
     }
     showLogin = () => {
-        const urlObj = url.parse(window.location.href, true);
-        if (this.props.clearLayerParam) {
-            delete urlObj.query.l;
-        }
-        urlObj.search = undefined;
-        window.location.href = ConfigUtils.getConfigProp("authServiceUrl") + "login?url=" + encodeURIComponent(url.format(urlObj));
+        window.location.href = MiscUtils.loginUrl(this.props.clearLayerParam);
     };
     resetIdleTimer = () => {
         if (this.idleTimer) {
@@ -71,17 +76,27 @@ class Authentication extends React.Component {
         }
     };
     idleAutologout = () => {
-        const urlObj = url.parse(window.location.href, true);
-        urlObj.search = undefined;
-        const loginUrl = ConfigUtils.getConfigProp("authServiceUrl") + "login?url=" + encodeURIComponent(url.format(urlObj));
+        const loginUrl = MiscUtils.loginUrl();
         window.location.href = ConfigUtils.getConfigProp("authServiceUrl") + "logout?url=" + encodeURIComponent(loginUrl);
     };
     render() {
-        return null;
+        if (!this.props.showLoginUser) {
+            return null;
+        }
+        const username = ConfigUtils.getConfigProp("username");
+        if (!username) {
+            return null;
+        }
+        return ReactDOM.createPortal((
+            <div className="app-info login-user">
+                <Icon icon="login" />
+                <span>{username}</span>
+            </div>
+        ), this.context);
     }
 }
 
 export default connect(state => ({
-    task: state.task.id
+    task: state.task
 }), {
 })(Authentication);

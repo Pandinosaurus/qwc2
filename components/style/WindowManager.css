@@ -4,13 +4,9 @@ iframe.windows-iframe-dialog-body {
     border: 0;
 }
 
-div.dock-window iframe.windows-iframe-dialog-body {
-    height: calc(100vh - 5.75em);
-}
-
 div.windows-notification-container {
     position: absolute;
-    top: 3.5em;
+    top: var(--topbar-height);
     left: 50%;
     transform: translateX(-50%);
     display: inline-block;
@@ -46,4 +42,10 @@ div.windows-notification-warn {
 
 div.windows-notification-error {
     background-color: red;
+}
+
+div.windows-notification-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
 }

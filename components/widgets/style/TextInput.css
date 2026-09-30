@@ -1,5 +1,14 @@
 div.text-input-wrapper {
     position: relative;
+    border: 1px solid var(--border-color);
+    background-color: var(--input-bg-color);
+    color: var(--text-color);
+    min-height: 2em;
+    display: flex;
+}
+
+div.text-input-wrapper-focused {
+    outline: var(--focus-outline);
 }
 
 textarea.text-input-form-el {
@@ -17,13 +26,23 @@ pre.text-input {
     font-family: "Helvetica Neue",Helvetica,Arial,sans-serif;
     font-size: 14px;
     margin: 0;
-    padding: 0.25em;
-    border: 1px solid var(--border-color);
-    background-color: var(--input-bg-color);
-    color: var(--text-color);
+    padding: calc(1em - 8px) 0.25em 0.25em 0.25em;
     overflow: auto;
     cursor: text;
     text-align: left;
+    height: 100%;
+    min-height: calc(2em - 2px);
+    white-space: nowrap;
+    outline: none;
+    width: 0;
+    flex: 1 1 auto;
+}
+
+pre.text-input.text-input-multiline {
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 pre.text-input[contenteditable="true"] a {
@@ -35,7 +54,11 @@ pre.text-input-disabled {
     background-color: var(--input-bg-color-disabled);
 }
 
-pre.div.text-input-readonly {
+pre.text-input-invalid {
+    background-color: #FFAAAA;
+}
+
+pre.text-input-readonly {
     color: var(--text-color-disabled);
 }
 
@@ -50,9 +73,12 @@ div.text-input-placeholder {
     color: var(--text-color-disabled);
     pointer-events: none;
     border: 1px solid transparent;
+    white-space: pre-wrap;
+    overflow: hidden;
 }
 
 div.text-input-resize-handle {
+    touch-action: none;
     position: absolute;
     right: 0;
     bottom: 0;
@@ -62,6 +88,15 @@ div.text-input-resize-handle {
     border-left: 10px solid transparent;
     z-index: 1;
     cursor: ns-resize;
+}
+
+div.text-input-clear-icon {
+    position: absolute;
+    right: 0.25em;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    justify-content: center;
 }
 
 span.text-input-link-tooltip {

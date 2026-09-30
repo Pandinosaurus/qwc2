@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,12 +7,15 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
-import omit from 'lodash.omit';
-import NumericInput from 'react-numeric-input2';
+
 import EditComboField from './EditComboField';
 import EditUploadField from './EditUploadField';
+import NumberInput from './widgets/NumberInput';
+import TextInput from './widgets/TextInput';
 import ToggleSwitch from './widgets/ToggleSwitch';
+
 import './style/AutoEditForm.css';
 
 export default class AutoEditForm extends React.Component {
@@ -35,8 +38,7 @@ export default class AutoEditForm extends React.Component {
         );
     }
     renderField = (field) => {
-        const multiline = (field.constraints || {}).multiline;
-        const constraints = omit(field.constraints || {}, ["multiline"]);
+        const {multiline, ...constraints} = (field.constraints || {});
         const readOnly = this.props.readOnly || constraints.readOnly;
         let value = (this.props.values || {})[field.id];
         if (value === undefined || value === null) {
@@ -44,7 +46,9 @@ export default class AutoEditForm extends React.Component {
         }
         let input = null;
         let title = field.name + ":";
-        if (field.type === "boolean" || field.type === "bool") {
+        if (constraints.hidden) {
+            return null;
+        } else if (field.type === "boolean" || field.type === "bool") {
             if (this.props.touchFriendly) {
                 const boolvalue = value === "1" || value === "on" || value === "true" || value === true;
                 input = (
@@ -59,59 +63,43 @@ export default class AutoEditForm extends React.Component {
                 );
             }
         } else if (constraints.values || constraints.keyvalrel) {
+            const [mapPrefix, keyvalrel] = constraints.keyvalrel.split('.', 2);
             input = (
-                <span className="input-frame">
-                    <EditComboField
-                        editIface={this.props.iface} fieldId={field.id} keyvalrel={constraints.keyvalrel}
-                        name={field.id} readOnly={readOnly} required={constraints.required}
-                        updateField={this.props.updateField} value={value} values={constraints.values} />
-                </span>
+                <EditComboField
+                    editIface={this.props.iface} fieldId={field.id}
+                    keyvalrel={keyvalrel} mapPrefix={mapPrefix}
+                    name={field.id} readOnly={readOnly} required={constraints.required}
+                    updateField={this.props.updateField} value={value} values={constraints.values} />
             );
         } else if (field.type === "number") {
-            const precision = constraints.step > 0 ? Math.ceil(-Math.log10(constraints.step)) : 6;
+            const precision = constraints.step > 0 ? Math.ceil(-Math.log10(constraints.step)) : 0;
             input = (
-                <NumericInput format={nr => String(Number(nr))} max={constraints.max} min={constraints.min}
-                    mobile={this.props.touchFriendly} name={field.id} onChange={nr => this.props.updateField(field.id, nr)}
-                    precision={precision} readOnly={readOnly} required={constraints.required}
-                    step={constraints.step || 1}
-                    strict value={value} />
+                <NumberInput decimals={precision} max={constraints.max} min={constraints.min}
+                    name={field.id} onChange={nr => this.props.updateField(field.id, nr)}
+                    readOnly={readOnly} required={constraints.required} value={value} />
             );
         } else if (field.type === "date") {
             // Truncate time portion of ISO date string
             value = value.substr(0, 10);
             input = (
-                <span className="input-frame">
-                    <input name={field.id} type={field.type} {...constraints}
-                        onChange={(ev) => this.props.updateField(field.id, ev.target.value)}
-                        value={value} />
-                </span>
+                <input name={field.id} type="date" {...constraints}
+                    onChange={(ev) => this.props.updateField(field.id, ev.target.value)}
+                    value={value} />
             );
         } else if (field.type === "text") {
-            if (multiline) {
-                input = (
-                    <textarea name={field.id} onChange={(ev) => this.props.updateField(field.id, ev.target.value)} readOnly={readOnly} required={constraints.required} value={value} />
-                );
-            } else {
-                input = (
-                    <span className="input-frame">
-                        <input name={field.id}
-                            onChange={(ev) => this.props.updateField(field.id, ev.target.value)}
-                            readOnly={readOnly} required={constraints.required} type={field.type} value={value}/>
-                    </span>
-                );
-            }
+            input = (
+                <TextInput multiline={multiline} name={field.id} onChange={text => this.props.updateField(field.id, text)} readOnly={readOnly} required={constraints.required} value={value} />
+            );
         } else if (field.type === "file") {
             input = (
                 <EditUploadField constraints={constraints} dataset={this.props.editLayerId}
-                    fieldId={field.id} name={field.id} updateField={this.props.updateField} value={value} />
+                    fieldId={field.id} iface={this.props.iface} name={field.id} updateField={this.props.updateField} value={value} />
             );
         } else {
             input = (
-                <span className="input-frame">
-                    <input name={field.id} type={field.type} {...constraints}
-                        onChange={(ev) => this.props.updateField(field.id, ev.target.value)}
-                        value={value}/>
-                </span>
+                <input name={field.id} type={field.type} {...constraints}
+                    onChange={(ev) => this.props.updateField(field.id, ev.target.value)}
+                    value={value}/>
             );
         }
         return (

@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,9 +7,12 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
-import Icon from '../Icon';
+
 import LocaleUtils from '../../utils/LocaleUtils';
+import Icon from '../Icon';
+
 import './style/FileSelector.css';
 
 export default class FileSelector extends React.Component {
@@ -20,7 +23,8 @@ export default class FileSelector extends React.Component {
         onFileSelected: PropTypes.func,
         onFilesSelected: PropTypes.func,
         overrideText: PropTypes.string,
-        showAllFilenames: PropTypes.bool
+        showAllFilenames: PropTypes.bool,
+        title: PropTypes.string
     };
     static defaultProps = {
         multiple: false,
@@ -55,12 +59,12 @@ export default class FileSelector extends React.Component {
         }
         const placeholder = LocaleUtils.tr("fileselector.placeholder");
         return (
-            <div className="FileSelector" onClick={this.triggerFileOpen}>
-                <input placeholder={placeholder} readOnly type="text" value={value} />
-                <button className="button">
+            <div className="FileSelector controlgroup" onClick={this.triggerFileOpen}>
+                <input placeholder={placeholder} readOnly title={this.props.title} type="text" value={value} />
+                <input accept={this.props.accept} multiple={this.props.multiple} onChange={this.fileChanged} ref={el => { this.fileinput = el; }} type="file" />
+                <button className="button" title={this.props.title}>
                     <Icon icon="folder-open" />
                 </button>
-                <input accept={this.props.accept} onChange={this.fileChanged} ref={el => { this.fileinput = el; }} type="file" multiple={this.props.multiple} />
             </div>
         );
     }

@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,6 +8,8 @@
  */
 
 import ol from 'openlayers';
+
+import ConfigUtils from '../../../utils/ConfigUtils';
 
 export default {
     create: (options) => {
@@ -18,7 +20,7 @@ export default {
         const layer = new ol.layer.Tile({
             minResolution: options.minResolution,
             maxResolution: options.maxResolution,
-            preload: Infinity,
+            preload: ConfigUtils.getConfigProp("tilePreloadLevels", null, 0),
             source: new ol.source.BingMaps({
                 projection: options.projection,
                 key: options.apiKey,

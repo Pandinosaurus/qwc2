@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,25 +7,34 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+import ReactDOM from 'react-dom';
 import {connect} from 'react-redux';
+
+import classNames from 'classnames';
 import isEmpty from 'lodash.isempty';
 import ol from 'openlayers';
-import {v1 as uuidv1} from 'uuid';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
 import {LayerRole} from '../../actions/layers';
 import {setSnappingConfig} from '../../actions/map';
 import Icon from '../../components/Icon';
-import Spinner from '../../components/Spinner';
+import {BottomToolPortalContext} from '../../components/PluginsContainer';
+import Spinner from '../../components/widgets/Spinner';
+import IdentifyUtils from '../../utils/IdentifyUtils';
 import LocaleUtils from '../../utils/LocaleUtils';
 import MapUtils from '../../utils/MapUtils';
-import IdentifyUtils from '../../utils/IdentifyUtils';
 import VectorLayerUtils from '../../utils/VectorLayerUtils';
 import SnapInteraction from './SnapInteraction';
 
 import './style/SnappingSupport.css';
 
 
+/**
+ * Snapping support for the map component.
+ */
 class SnappingSupport extends React.Component {
+    static contextType = BottomToolPortalContext;
     static propTypes = {
         layers: PropTypes.array,
         map: PropTypes.object,
@@ -45,27 +54,35 @@ class SnappingSupport extends React.Component {
         this.source = new ol.source.Vector();
         this.snapInteraction = new SnapInteraction({
             source: this.source,
-            edge: this.snapToEdge(props.mapObj.snapping),
-            vertex: this.snapToVertex(props.mapObj.snapping)
+            edge: this.snapModeActive(props.mapObj.snapping, 'edge'),
+            vertex: this.snapModeActive(props.mapObj.snapping, 'vertex'),
+            intersection: this.snapModeActive(props.mapObj.snapping, 'intersection'),
+            perpendicular: this.snapModeActive(props.mapObj.snapping, 'perpendicular')
         });
         this.snapInteraction.setActive(this.props.mapObj.snapping.active);
+        this.featureInfoCache = {};
         this.inEventHandler = false;
 
         props.map.getInteractions().on('add', this.handleInteractionAdded);
         props.map.getInteractions().on('remove', this.handleInteractionRemoved);
+        MapUtils.registerHook(MapUtils.GET_SNAPPED_COORDINATES_FROM_PIXEL_HOOK, (pixel) => {
+            const coo = props.map.getCoordinateFromPixel(pixel);
+            const snapResult = this.snapInteraction.snapTo(pixel, coo, props.map);
+            return snapResult ? props.map.getCoordinateFromPixel(snapResult.vertexPixel) : coo;
+        });
     }
     componentDidUpdate(prevProps, prevState) {
-        if (this.props.mapObj.bbox !== prevProps.mapObj.bbox || this.props.theme !== prevProps.theme) {
+        if (this.state.drawing && (this.props.mapObj.bbox !== prevProps.mapObj.bbox || this.props.theme !== prevProps.theme)) {
             this.setState({invalid: true});
             this.refreshFeatureCache(true);
-        } else if (this.props.layers !== prevProps.layers && this.state.havesnaplayers) {
+        } else if (this.state.drawing && this.props.layers !== prevProps.layers) {
             const layersChanged = this.props.layers.find(layer => {
                 if (layer.role === LayerRole.THEME) {
-                    const prev = prevProps.layers.find(prevLayer => layer.uuid === prevLayer.uuid);
-                    return prev && layer.rev !== prev.rev;
+                    const prev = prevProps.layers.find(prevLayer => layer.id === prevLayer.id);
+                    return !prev || layer.rev !== prev.rev;
                 } else if (layer.role === LayerRole.USERLAYER && layer.type === 'vector') {
-                    const prev = prevProps.layers.find(prevLayer => layer.uuid === prevLayer.uuid);
-                    return prev && prev.features !== layer.features;
+                    const prev = prevProps.layers.find(prevLayer => layer.id === prevLayer.id);
+                    return !prev || prev.features !== layer.features;
                 }
                 return false;
             });
@@ -77,8 +94,10 @@ class SnappingSupport extends React.Component {
         }
         if (this.props.mapObj.snapping.active !== prevProps.mapObj.snapping.active || this.state.drawing !== prevState.drawing) {
             this.snapInteraction.setActive(this.props.mapObj.snapping.active !== false);
-            this.snapInteraction.setSnapEdge(this.snapToEdge(this.props.mapObj.snapping));
-            this.snapInteraction.setSnapVertex(this.snapToVertex(this.props.mapObj.snapping));
+            this.snapInteraction.setSnapEdge(this.snapModeActive(this.props.mapObj.snapping, 'edge'));
+            this.snapInteraction.setSnapVertex(this.snapModeActive(this.props.mapObj.snapping, 'vertex'));
+            this.snapInteraction.setSnapIntersection(this.snapModeActive(this.props.mapObj.snapping, 'intersection'));
+            this.snapInteraction.setSnapPerpendicular(this.snapModeActive(this.props.mapObj.snapping, 'perpendicular'));
             if (this.props.mapObj.snapping.active) {
                 this.refreshFeatureCache();
             }
@@ -89,58 +108,55 @@ class SnappingSupport extends React.Component {
             return null;
         }
         const disabled = !this.state.havesnaplayers || this.props.mapObj.snapping.active === false;
-        const toolbarClass = disabled ? "snapping-toolbar-inactive" : "";
-        const snapEdge = this.snapToEdge(this.props.mapObj.snapping);
-        const snapVertex = this.snapToVertex(this.props.mapObj.snapping);
-        return (
-            <div className="snapping-toolbar-container">
-                <div className={toolbarClass}>
-                    {this.state.reqId !== null ? (
-                        <Spinner/>
-                    ) : (
-                        <span>
-                            <button className={"button" + (snapVertex ? " pressed" : "")} onClick={() => this.toggleSnap('vertex')} title={LocaleUtils.tr("snapping.vertex")}>
-                                <Icon icon="snap_vertex" size="large" />
-                            </button>
-                            <button className={"button" + (snapEdge ? " pressed" : "")} onClick={() => this.toggleSnap('edge')} title={LocaleUtils.tr("snapping.edge")}>
-                                <Icon icon="snap_edge" size="large" />
-                            </button>
-                        </span>
-                    )}
-                    &nbsp;
+        const className = classNames({
+            "snapping-toolbar": true,
+            "snapping-toolbar-inactive": disabled
+        });
+        const snapEdge = this.snapModeActive(this.props.mapObj.snapping, 'edge');
+        const snapVertex = this.snapModeActive(this.props.mapObj.snapping, 'vertex');
+        const snapIntersection = this.snapModeActive(this.props.mapObj.snapping, 'intersection');
+        const snapPerpendicular = this.snapModeActive(this.props.mapObj.snapping, 'perpendicular');
+        return ReactDOM.createPortal((
+            <div className={className}>
+                <span className="snapping-toolbar-label">
                     {this.state.reqId ? LocaleUtils.tr("snapping.loading") : LocaleUtils.tr("snapping.snappingenabled")}
-                </div>
+                </span>
+                {this.state.reqId !== null ? (
+                    <Spinner/>
+                ) : (
+                    <span>
+                        <button className={"button" + (snapVertex ? " pressed" : "")} onClick={() => this.toggleSnap('vertex')} title={LocaleUtils.tr("snapping.vertex")}>
+                            <Icon icon="snap_vertex" />
+                        </button>
+                        <button className={"button" + (snapEdge ? " pressed" : "")} onClick={() => this.toggleSnap('edge')} title={LocaleUtils.tr("snapping.edge")}>
+                            <Icon icon="snap_edge" />
+                        </button>
+                        <button className={"button " + (snapIntersection ? " pressed" : "")} onClick={() => this.toggleSnap('intersection')} title={LocaleUtils.tr("snapping.intersection")}>
+                            <Icon icon="snap_intersection" />
+                        </button>
+                        <button className={"button " + (snapPerpendicular ? " pressed" : "")} onClick={() => this.toggleSnap('perpendicular')} title={LocaleUtils.tr("snapping.perpendicular")}>
+                            <Icon icon="snap_perpendicular" />
+                        </button>
+                    </span>
+                )}
             </div>
-        );
+        ), this.context);
     }
-    snapToEdge = (snappingConfig) => {
-        return snappingConfig.active === true || snappingConfig.active === 'edge';
-    };
-    snapToVertex = (snappingConfig) => {
-        return snappingConfig.active === true || snappingConfig.active === 'vertex';
+    snapModeActive = (snappingConfig, mode) => {
+        const active = snappingConfig.active;
+        return active === true || (Array.isArray(active) && active.includes(mode));
     };
     toggleSnap = (mode) => {
         let active = this.props.mapObj.snapping.active;
-        if (mode === 'edge') {
-            if (active === true) {
-                active = 'vertex';
-            } else if (active === 'edge') {
-                active = false;
-            } else if (active === 'vertex') {
-                active = true;
-            } else {
-                active = 'edge';
-            }
-        } else if (mode === 'vertex') {
-            if (active === true) {
-                active = 'edge';
-            } else if (active === 'vertex') {
-                active = false;
-            } else if (active === 'edge') {
-                active = true;
-            } else {
-                active = 'vertex';
-            }
+        if (active === true) {
+            active = ['edge', 'vertex', 'intersection', 'perpendicular'];
+        } else if (active === false) {
+            active = [];
+        }
+        if (active.includes(mode)) {
+            active = active.filter(x => x !== mode);
+        } else {
+            active = [...active, mode];
         }
         this.props.setSnappingConfig(true, active);
     };
@@ -166,15 +182,18 @@ class SnappingSupport extends React.Component {
         this.inEventHandler = false;
     };
     addSnapInteractionIfNeeded = (interactions) => {
+        this.featureInfoCache = {};
         // Just to be sure
         interactions.remove(this.snapInteraction);
+        this.snapInteraction.detach();
         // If there is any draw or modify interaction, add snapping interaction
         let added = false;
         if (this.props.mapObj.snapping.enabled) {
             for (let i = 0; i < interactions.getLength(); ++i) {
                 const interaction = interactions.item(i);
-                if ((interaction instanceof ol.interaction.Draw) || (interaction instanceof ol.interaction.Modify)) {
+                if ((interaction instanceof ol.interaction.Draw) || (interaction instanceof ol.interaction.Modify) || (interaction instanceof ol.interaction.Select)) {
                     interactions.push(this.snapInteraction);
+                    this.snapInteraction.attach();
                     added = true;
                     break;
                 }
@@ -183,7 +202,7 @@ class SnappingSupport extends React.Component {
         this.setState({drawing: added});
     };
     refreshFeatureCache = (force) => {
-        if (!this.state.invalid && !force) {
+        if (!this.state.invalid && !force || !this.state.drawing) {
             return;
         }
         this.source.clear();
@@ -238,27 +257,35 @@ class SnappingSupport extends React.Component {
                 [xmin, ymin]
             ]]
         });
+        const cacheKey = `${xmin}:${ymin}:${xmax}:${ymax}`;
+        if (cacheKey in this.featureInfoCache) {
+            this.source.addFeatures(this.featureInfoCache[cacheKey]);
+            this.addLocalSnapFeatures(localLayers);
+            this.setState({invalid: false, reqId: null, havesnaplayers: true});
+            return;
+        }
         const options = {
-            LAYERATTRIBS: JSON.stringify([]),
+            LAYERATTRIBS: JSON.stringify(snapLayers.reduce((res, key) => ({...res, [key]: []}), {}) ),
             with_htmlcontent: false,
             with_bbox: false,
             feature_count: snappingConfig.featureCount || 500
         };
         const request = IdentifyUtils.buildFilterRequest(themeLayer, snapLayers.join(","), filterGeom, this.props.mapObj, options);
-        const reqId = uuidv1();
+        const reqId = uuidv4();
         this.setState({reqId: reqId});
         IdentifyUtils.sendRequest(request, (response) => {
             if (this.state.reqId !== reqId) {
                 return;
             }
             if (response) {
-                const result = IdentifyUtils.parseXmlResponse(response, this.props.mapObj.projection);
+                const result = IdentifyUtils.parseXmlResponse(response, this.props.mapObj.projection, themeLayer);
                 const features = Object.values(result).reduce((res, cur) => [...res, ...cur], []);
                 const format = new ol.format.GeoJSON();
                 const olFeatures = format.readFeatures({
                     type: "FeatureCollection",
-                    features: features.map(feature => ({...feature, id: uuidv1()}))
+                    features: features.map(feature => ({...feature, id: uuidv4()}))
                 });
+                this.featureInfoCache[cacheKey] = olFeatures;
                 this.source.addFeatures(olFeatures);
                 // Add features from local layers
                 this.addLocalSnapFeatures(localLayers);

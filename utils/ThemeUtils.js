@@ -1,19 +1,18 @@
 /**
- * Copyright 2018-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
+import {remove as removeDiacritics} from 'diacritics';
 import isEmpty from 'lodash.isempty';
 import url from 'url';
 import {v4 as uuidv4} from 'uuid';
-import {remove as removeDiacritics} from 'diacritics';
 
-import {SearchResultType} from '../actions/search';
 import {LayerRole} from '../actions/layers';
-import {NotificationType, showNotification} from '../actions/windows';
+import {SearchResultType} from '../utils/SearchProviders';
 import ConfigUtils from './ConfigUtils';
 import LayerUtils from './LayerUtils';
 import LocaleUtils from './LocaleUtils';
@@ -33,11 +32,11 @@ const ThemeUtils = {
         }
         return null;
     },
-    createThemeBackgroundLayers(theme, themes, visibleLayer, externalLayers, dispatch, initialTheme) {
+    createThemeBackgroundLayers(backgroundLayers, themes, visibleLayer, externalLayers) {
         const bgLayers = [];
         let visibleIdx = -1;
         let defaultVisibleIdx = -1;
-        for (const entry of (theme.backgroundLayers || [])) {
+        for (const entry of backgroundLayers) {
             if (!entry.name) {
                 continue;
             }
@@ -54,7 +53,9 @@ const ThemeUtils = {
                     role: LayerRole.BACKGROUND,
                     thumbnail: bgLayer.thumbnail || "img/mapthumbs/default.jpg",
                     visibility: false,
-                    opacity: bgLayer.opacity !== undefined ? bgLayer.opacity : 255
+                    opacity: bgLayer.opacity !== undefined ? bgLayer.opacity : 255,
+                    omitFromCycle: entry.omitFromCycle,
+                    omitFromSelect: entry.omitFromSelect
                 };
                 if (bgLayer.resource) {
                     bgLayer.id = uuidv4();
@@ -65,7 +66,7 @@ const ThemeUtils = {
                     (externalLayers[key] = externalLayers[key] || []).push(params);
                     delete bgLayer.resource;
                 } else if (bgLayer.type === "wms") {
-                    bgLayer.version = bgLayer.params.VERSION || bgLayer.version || themes.defaultWMSVersion || "1.3.0";
+                    bgLayer.version = bgLayer.params?.VERSION || bgLayer.version || themes.defaultWMSVersion || "1.3.0";
                 } else if (bgLayer.type === "group") {
                     bgLayer.items = bgLayer.items.map(item => {
                         if (item.ref) {
@@ -94,12 +95,9 @@ const ThemeUtils = {
         } else if (defaultVisibleIdx >= 0 && visibleLayer !== "") {
             bgLayers[defaultVisibleIdx].visibility = true;
         }
-        if (initialTheme && visibleIdx === -1 && visibleLayer) {
-            dispatch(showNotification("missingbglayer", LocaleUtils.tr("app.missingbg", visibleLayer), NotificationType.WARN, true));
-        }
         return bgLayers;
     },
-    createThemeLayer(theme, themes, role = LayerRole.THEME, subLayers = []) {
+    createThemeLayer(theme, themes, role = LayerRole.THEME, subLayers = null) {
         const urlParts = url.parse(theme.url, true);
         // Resolve relative urls
         if (!urlParts.host) {
@@ -107,6 +105,7 @@ const ThemeUtils = {
             urlParts.protocol = locationParts.protocol;
             urlParts.host = locationParts.host;
         }
+        const sublayerNames = LayerUtils.getSublayerNames({sublayers: subLayers ?? theme.sublayers});
         const baseParams = urlParts.query;
         let layer = {
             type: "wms",
@@ -118,7 +117,7 @@ const ThemeUtils = {
             name: theme.name,
             title: theme.title,
             bbox: theme.bbox,
-            sublayers: (Array.isArray(subLayers) && subLayers.length) ? subLayers : theme.sublayers,
+            sublayers: subLayers ?? theme.sublayers ?? [],
             tiled: theme.tiled,
             tileSize: theme.tileSize,
             ratio: !theme.tiled ? 1 : undefined,
@@ -131,6 +130,9 @@ const ThemeUtils = {
             printUrl: ThemeUtils.inheritBaseUrlParams(theme.printUrl, theme.url, baseParams),
             featureInfoUrl: ThemeUtils.inheritBaseUrlParams(theme.featureInfoUrl, theme.url, baseParams),
             infoFormats: theme.infoFormats,
+            mapFormats: theme.availableFormats,
+            layerTreeHiddenSublayers: theme.layerTreeHiddenSublayers,
+            predefinedFilters: (theme.predefinedFilters || []).filter(entry => Object.keys(entry.filter).find(name => sublayerNames.includes(name))),
             externalLayerMap: {
                 ...theme.externalLayerMap,
                 ...(theme.externalLayers || []).reduce((res, cur) => {
@@ -140,8 +142,19 @@ const ThemeUtils = {
                     LayerUtils.completeExternalLayer(res[cur.internalLayer], LayerUtils.searchSubLayer(theme, 'name', cur.internalLayer));
                     return res;
                 }, {})
-            }
+            },
+            srcid: uuidv4(),
+            translations: theme.translations,
+            translationsUrl: theme.translationsUrl,
+            editConfig: theme.editConfig,
+            editConfigUrl: theme.editConfigUrl,
+            filter: theme.filter,
+            labelProfiles: {...themes.defaultLabelProfiles, ...theme.labelProfiles},
+            wms_name: theme.wms_name
         };
+        if (layer.editConfigUrl) {
+            layer.editConfigUrl += encodeURIComponent(sublayerNames);
+        }
         layer = LayerUtils.recomputeLayerBBox(layer);
         // Drawing order only makes sense if layer reordering is disabled
         if (ConfigUtils.getConfigProp("allowReorderingLayers", theme) !== true) {
@@ -173,9 +186,8 @@ const ThemeUtils = {
         return isEmpty(matches) ? [] : [{
             id: "themes",
             titlemsgid: "search.themes",
-            priority: -1,
+            type: SearchResultType.THEME,
             items: matches.map(theme => ({
-                type: SearchResultType.THEME,
                 id: theme.id,
                 text: theme.title,
                 theme: theme,
@@ -218,9 +230,8 @@ const ThemeUtils = {
         return isEmpty(matches) ? [] : [{
             id: "themelayers",
             titlemsgid: "search.themelayers",
-            priority: -1,
+            type: SearchResultType.THEMELAYER,
             items: matches.map(result => ({
-                type: SearchResultType.EXTERNALLAYER,
                 id: result.layer.id + ":" + result.layer.sublayers[0].name,
                 text: result.layer.title + ": " + result.layer.sublayers[0].title,
                 layer: result.layer,
@@ -235,7 +246,7 @@ const ThemeUtils = {
         });
         return names;
     },
-    themFlagsAllowed(theme, flagWhitelist, flagBlacklist) {
+    themeFlagsAllowed(theme, flagWhitelist, flagBlacklist) {
         const themeFlags = theme?.flags || [];
         if (flagBlacklist && flagBlacklist.find(flag => themeFlags.includes(flag)) !== undefined) {
             return false;
@@ -244,6 +255,53 @@ const ThemeUtils = {
             return false;
         }
         return true;
+    },
+    allowedItems(items, theme, filter = null) {
+        return (items || []).map(item => {
+            if (item.subitems) {
+                const subitems = ThemeUtils.allowedItems(item.subitems, theme, filter).filter(Boolean);
+                if (!isEmpty(subitems)) {
+                    return {...item, subitems};
+                } else {
+                    return null;
+                }
+            } else {
+                if (filter && !filter(item)) {
+                    return null;
+                }
+                if (theme) {
+                    if (!ThemeUtils.themeFlagsAllowed(theme, item.themeFlagWhitelist, item. themeFlagBlacklist)) {
+                        return null;
+                    }
+                    if (item.themeBlacklist && (item.themeBlacklist.includes(theme.title) || item.themeBlacklist.includes(theme.name))) {
+                        return null;
+                    }
+                    if (item.themeWhitelist && !(item.themeWhitelist.includes(theme.title) || item.themeWhitelist.includes(theme.name))) {
+                        return null;
+                    }
+                    if (item.requireAuth && !ConfigUtils.getConfigProp("username")) {
+                        return null;
+                    }
+                }
+                return item;
+            }
+        }).filter(Boolean);
+    },
+    applyCommonTranslations(group) {
+        const commonTranslations = LocaleUtils.commonTranslations();
+        return {
+            ...group,
+            subdirs: group.subdirs ? group.subdirs.map(ThemeUtils.applyCommonTranslations) : null,
+            items: group.items ? group.items.map(item => ({
+                ...LayerUtils.applyTranslations(item, commonTranslations),
+                print: (item.print || []).map(layout => {
+                    return {
+                        ...layout,
+                        title: commonTranslations.layouts?.[layout.name] ?? layout.title
+                    };
+                })
+            })) : null
+        };
     }
 };
 

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -14,6 +14,8 @@ export const LOCAL_CONFIG_LOADED = 'LOCAL_CONFIG_LOADED';
 export const SET_STARTUP_PARAMETERS = 'SET_STARTUP_PARAMETERS';
 export const SET_COLOR_SCHEME = 'SET_COLOR_SCHEME';
 export const SET_USER_INFO_FIELDS = 'SET_USER_INFO_FIELDS';
+export const REGISTER_CUSTOM_PLUGIN = 'REGISTER_CUSTOM_PLUGIN';
+export const UNREGISTER_CUSTOM_PLUGIN = 'UNREGISTER_CUSTOM_PLUGIN';
 
 export function localConfigLoaded(config) {
     return {
@@ -22,10 +24,11 @@ export function localConfigLoaded(config) {
     };
 }
 
-export function setStartupParameters(params) {
+export function setStartupParameters(params, state) {
     return {
         type: SET_STARTUP_PARAMETERS,
-        params
+        params,
+        state
     };
 }
 
@@ -41,5 +44,20 @@ export function setUserInfoFields(fields) {
     return {
         type: SET_USER_INFO_FIELDS,
         fields
+    };
+}
+
+export function registerCustomPlugin(name, availableIn3D) {
+    return {
+        type: REGISTER_CUSTOM_PLUGIN,
+        name,
+        availableIn3D: availableIn3D
+    };
+}
+
+export function unregisterCustomPlugin(name) {
+    return {
+        type: UNREGISTER_CUSTOM_PLUGIN,
+        name
     };
 }

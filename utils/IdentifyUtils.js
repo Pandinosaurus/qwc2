@@ -1,24 +1,29 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import isEmpty from 'lodash.isempty';
+import axios from 'axios';
 import geojsonBbox from 'geojson-bounding-box';
+import isEmpty from 'lodash.isempty';
 import ol from 'openlayers';
 import url from 'url';
-import axios from 'axios';
-import {v1 as uuidv1} from 'uuid';
+import {v4 as uuidv4} from 'uuid';
+
 import {LayerRole} from '../actions/layers';
-import CoordinatesUtils from '../utils/CoordinatesUtils';
 import ConfigUtils from '../utils/ConfigUtils';
+import CoordinatesUtils from '../utils/CoordinatesUtils';
+import DataServiceExprUtils from '../utils/DataServiceExprUtils';
 import LayerUtils from '../utils/LayerUtils';
 import MapUtils from '../utils/MapUtils';
 import VectorLayerUtils from './VectorLayerUtils';
 
+
+export const EXCLUDE_PROPS = ['featurereport', 'displayfield', 'layername', 'layertitle', 'layerinfo', 'attribnames', 'clickPos', 'displayname', 'bbox', 'crs'];
+export const EXCLUDE_ATTRS = ['htmlContent', 'htmlContentInline'];
 
 function identifyRequestParams(layer, queryLayers, projection, params) {
     let format = 'text/plain';
@@ -31,6 +36,20 @@ function identifyRequestParams(layer, queryLayers, projection, params) {
         format = 'application/geo+json';
     } else if (infoFormats.includes('application/json')) {
         format = 'application/json';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.2.1')) {
+        format = 'text/xml;subtype=gml/3.2.1';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.2.0')) {
+        format = 'text/xml;subtype=gml/3.2.0';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.2')) {
+        format = 'text/xml;subtype=gml/3.2';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.1.1')) {
+        format = 'text/xml;subtype=gml/3.1.1';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.1.0')) {
+        format = 'text/xml;subtype=gml/3.1.0';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.1')) {
+        format = 'text/xml;subtype=gml/3.1';
+    } else if (infoFormats.includes('text/xml;subtype=gml/3.0')) {
+        format = 'text/xml;subtype=gml/3.0';
     } else if (infoFormats.includes('text/html')) {
         format = 'text/html';
     } else if (infoFormats.includes('application/vnd.ogc.gml')) {
@@ -41,6 +60,8 @@ function identifyRequestParams(layer, queryLayers, projection, params) {
         ...res, [lyr]: styles[idx] ?? ''
     }));
     const queryStyles = queryLayers.split(',').map(lyr => styleMap[lyr] ?? '').join(",");
+    const cleanParams = {...params};
+    delete cleanParams.region_feature_count;
     return {
         url: layer.featureInfoUrl.split("?")[0],
         params: {
@@ -54,12 +75,14 @@ function identifyRequestParams(layer, queryLayers, projection, params) {
             styles: queryStyles,
             srs: projection,
             crs: projection,
+            format: layer.format ?? 'image/png',
             info_format: format,
             with_geometry: true,
             with_maptip: false,
             ...layer.dimensionValues,
-            ...params
-        }
+            ...cleanParams
+        },
+        id: uuidv4()
     };
 }
 
@@ -91,6 +114,65 @@ const IdentifyUtils = {
         });
         return result;
     },
+    resolveIdentifyLayer(queryableLayers, layerRef) {
+        // A layer reference is either a plain sublayer name, or the `<wms_name>#<sublayer>`
+        // form used by the custom filter entries of the `f` parameter
+        const [wmsName, sublayer] = layerRef.includes("#") ? layerRef.split("#") : [null, layerRef];
+        const candidates = queryableLayers.filter(l => l.queryLayers.includes(sublayer) && (!wmsName || l.wms_name === wmsName));
+        if (isEmpty(candidates)) {
+            /* eslint-disable-next-line */
+            console.warn("No queryable layer found for identify features entry: " + layerRef);
+            return null;
+        }
+        // Only layers with a wms_name can carry a filter, see LayerUtils.buildWMSLayerParams
+        const filterable = candidates.filter(l => l.wms_name);
+        if (isEmpty(filterable)) {
+            /* eslint-disable-next-line */
+            console.warn("Layer does not support identifying features by attribute: " + layerRef);
+            return null;
+        }
+        if (filterable.length > 1) {
+            /* eslint-disable-next-line */
+            console.warn("Ambiguous identify features layer '" + layerRef + "', use one of: " + filterable.map(l => l.wms_name + "#" + sublayer).join(", "));
+            return null;
+        }
+        return [filterable[0], sublayer];
+    },
+    parseIdentifyFilter(identifyFilter, layers, map) {
+        let entries;
+        try {
+            entries = JSON.parse(identifyFilter);
+        } catch {
+            /* eslint-disable-next-line */
+            console.warn("Invalid identify features parameter: " + identifyFilter);
+            return [];
+        }
+        if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+            /* eslint-disable-next-line */
+            console.warn("Identify features parameter must be a layer to expression object: " + identifyFilter);
+            return [];
+        }
+        const queryableLayers = this.getQueryLayers(layers, map);
+        return Object.entries(entries).reduce((layerEntries, [layerRef, expr]) => {
+            if (!DataServiceExprUtils.isValid(expr)) {
+                /* eslint-disable-next-line */
+                console.warn("Invalid identify features expression for layer " + layerRef + ": " + JSON.stringify(expr));
+                return layerEntries;
+            }
+            const resolved = this.resolveIdentifyLayer(queryableLayers, layerRef);
+            if (!resolved) {
+                return layerEntries;
+            }
+            const [layer, sublayer] = resolved;
+            const layerEntry = layerEntries.find(l => l.layer === layer);
+            if (layerEntry) {
+                layerEntry.entries.push({sublayer: sublayer, expr: expr});
+            } else {
+                layerEntries.push({layer: layer, entries: [{sublayer: sublayer, expr: expr}]});
+            }
+            return layerEntries;
+        }, []);
+    },
     buildRequest(layer, queryLayers, center, map, options = {}) {
         const size = [101, 101];
         const resolution = MapUtils.computeForZoom(map.resolutions, map.zoom);
@@ -116,13 +198,11 @@ const IdentifyUtils = {
         return identifyRequestParams(layer, queryLayers, map.projection, params);
     },
     buildFilterRequest(layer, queryLayers, filterGeom, map, options = {}) {
-        const size = [101, 101];
         const params = {
-            height: size[0],
-            width: size[1],
-            feature_count: 100,
-            FILTER_GEOM: filterGeom,
-            ...options
+            filter: layer.params.FILTER ?? '',
+            ...(filterGeom ? {FILTER_GEOM: filterGeom} : {}),
+            ...options,
+            feature_count: options.region_feature_count ?? options.feature_count ?? 100
         };
         return identifyRequestParams(layer, queryLayers, map.projection, params);
     },
@@ -158,16 +238,23 @@ const IdentifyUtils = {
             });
         }
     },
-    parseResponse(response, layer, format, clickPoint, projection, featureInfoReturnsLayerName, layers) {
-        const digits = CoordinatesUtils.getUnits(projection).units === 'degrees' ? 4 : 0;
-        const posstr = clickPoint ? clickPoint[0].toFixed(digits) + ", " + clickPoint[1].toFixed(digits) : "";
+    parseResponse(response, layer, format, clickPoint, projection) {
+        if (!response) {
+            return {};
+        }
+        const decimals = CoordinatesUtils.getPrecision(projection);
+        const posstr = clickPoint ? clickPoint[0].toFixed(decimals) + ", " + clickPoint[1].toFixed(decimals) : "";
         let results = {};
         if (["application/json", "application/geojson", "application/geo+json", "GeoJSON"].includes(format)) {
             results = IdentifyUtils.parseGeoJSONResponse(response, projection, layer);
         } else if (format === "text/xml") {
-            results = IdentifyUtils.parseXmlResponse(response, projection, posstr, featureInfoReturnsLayerName, layers);
+            results = IdentifyUtils.parseXmlResponse(response, projection, layer, posstr);
         } else if (format === "application/vnd.ogc.gml") {
-            results = IdentifyUtils.parseGmlResponse(response, projection, posstr, layer);
+            results = IdentifyUtils.parseGmlResponse(response, projection, layer, posstr);
+        } else if (format.startsWith("text/xml;subtype=gml/3.1") || format.startsWith("text/xml;subtype=gml/3.0")) {
+            results = IdentifyUtils.parseGml3Response(response, projection, layer);
+        } else if (format.startsWith("text/xml;subtype=gml/3.2")) {
+            results = IdentifyUtils.parseGml32Response(response, projection, layer);
         } else if (format === "text/plain") {
             results[layer.name] = [{type: "text", text: response, id: posstr, layername: layer.name, layertitle: layer.title}];
         } else if (format === "text/html") {
@@ -182,6 +269,8 @@ const IdentifyUtils = {
                 }
                 item.clickPos = clickPoint;
                 item.displayname = IdentifyUtils.determineDisplayName(layer, layername, item);
+                item.layertitle = item.layertitle ?? layername;
+                item.wms_name = layer.wms_name;
             }
         }
         return results;
@@ -199,9 +288,16 @@ const IdentifyUtils = {
                 return properties[sublayer.displayField];
             }
         }
-        return properties.name || properties.Name || properties.NAME || item.id;
+        const fallbackDisplayFields = ConfigUtils.getConfigProp("fallbackDisplayFields", null, ["name", "id"]).map(field => field.toLowerCase());
+        const propertyCaseMap = Object.keys(properties).reduce((res, key) => ({...res, [key.toLowerCase()]: key}), {});
+        for (const field of fallbackDisplayFields) {
+            if (field in propertyCaseMap) {
+                return properties[propertyCaseMap[field]];
+            }
+        }
+        return item.id ?? "";
     },
-    parseXmlFeature(feature, geometrycrs, id, featurereport, displayfield, layername, layertitle, layerinfo) {
+    parseXmlFeature(feature, geometrycrs, id, featurereport, displayfield, layername, layertitle, layerinfo, translations) {
         const featureResult = {};
         featureResult.type = "Feature";
         featureResult.id = id;
@@ -234,9 +330,10 @@ const IdentifyUtils = {
                     featureResult.geometry = geoJsonFeature.geometry;
                 }
             } else {
-                featureResult.properties[attribute.attributes.name.value] = attribute.attributes.value.value;
+                const attrname = translations?.layers?.[layername]?.fields?.[attribute.attributes.name.value] ?? attribute.attributes.name.value;
+                featureResult.properties[attrname] = attribute.attributes.value.value;
                 if (attribute.attributes.attrname) {
-                    attrmapping[attribute.attributes.name.value] = attribute.attributes.attrname.value;
+                    attrmapping[attrname] = attribute.attributes.attrname.value;
                 }
             }
         }
@@ -244,42 +341,50 @@ const IdentifyUtils = {
         if (htmlContent.length > 0) {
             featureResult.properties.htmlContent = htmlContent[0].textContent;
             featureResult.properties.htmlContentInline = (htmlContent[0].getAttribute("inline") === "1" || htmlContent[0].getAttribute("inline") === "true");
+            featureResult.properties.htmlContent = featureResult.properties.htmlContent.replace(
+                /translate\(([^)]+)\)/g, (match, cap) => translations?.layers?.[layername]?.fields?.[cap] ?? cap
+            );
         }
         if (!isEmpty(attrmapping)) {
             featureResult.attribnames = attrmapping;
         }
         return featureResult;
     },
-    parseXmlResponse(response, geometrycrs, posstr = null, featureInfoReturnsLayerName = false, mapLayers = null) {
+    parseXmlResponse(response, geometrycrs, layer, posstr = null) {
         const parser = new DOMParser();
 
         const doc = parser.parseFromString(response, "text/xml");
-        const layers = [].slice.call(doc.firstChild.getElementsByTagName("Layer"));
+        const layersEl = [].slice.call(doc.firstChild?.getElementsByTagName?.("Layer") || []);
         const result = {};
         let idcounter = 0;
-        for (const layer of layers) {
-            const featurereport = layer.attributes.featurereport ? layer.attributes.featurereport.value : null;
-            const displayfield = layer.attributes.displayfield ? layer.attributes.displayfield.value : null;
+        for (const layerEl of layersEl) {
+            const featurereport = layerEl.attributes.featurereport ? layerEl.attributes.featurereport.value : null;
+            const displayfield = layerEl.attributes.displayfield ? layerEl.attributes.displayfield.value : null;
             let layername = "";
             let layertitle = "";
-            if (featureInfoReturnsLayerName) {
-                layername = layer.attributes.name.value;
-                const match = LayerUtils.searchLayer(mapLayers, 'name', layername);
-                layertitle = match ? match.sublayer.title : layername;
+            if (layerEl.attributes.title) {
+                // QGIS Server 3.36+ / qwc-feature-info-service 2025.12.18+
+                layername = layerEl.attributes.name.value;
+                layertitle = layer.translations?.layertree?.[layername] ?? layerEl.attributes.title.value;
+            } else if (layerEl.attributes.layername) {
+                // qwc-feature-info-service < 2025.12.18
+                layername = layerEl.attributes.layername.value;
+                layertitle = layer.translations?.layertree?.[layername] ?? layerEl.attributes.name.value;
             } else {
-                layertitle = layer.attributes.name.value;
-                layername = layer.attributes.layername ? layer.attributes.layername.value : layertitle;
+                // QGIS Server < 3.36
+                layername = layerEl.attributes.name.value;
+                layertitle = LayerUtils.searchSubLayer(layer, 'name', layername)?.title ?? layername;
             }
 
-            const layerinfo = layer.attributes.layerinfo ? layer.attributes.layerinfo.value : null;
-            const features = [].slice.call(layer.getElementsByTagName("Feature"));
+            const layerinfo = layerEl.attributes.layerinfo ? layerEl.attributes.layerinfo.value : null;
+            const features = [].slice.call(layerEl.getElementsByTagName("Feature"));
             if (features.length > 0) {
-                result[layername] = features.map(feature => this.parseXmlFeature(feature, geometrycrs, feature.attributes.id.value, featurereport, displayfield, layername, layertitle, layerinfo));
+                result[layername] = features.map(feature => this.parseXmlFeature(feature, geometrycrs, feature.attributes.id.value, featurereport, displayfield, layername, layertitle, layerinfo, layer.translations));
             } else {
-                const attributes = [].slice.call(layer.getElementsByTagName("Attribute"));
+                const attributes = [].slice.call(layerEl.getElementsByTagName("Attribute"));
                 if (attributes.length > 0) {
                     const id = posstr || "" + (idcounter++);
-                    result[layername] = [this.parseXmlFeature(layer, geometrycrs, id, featurereport, displayfield, layername, layertitle, layerinfo)];
+                    result[layername] = [this.parseXmlFeature(layerEl, geometrycrs, id, featurereport, displayfield, layername, layertitle, layerinfo)];
                 }
             }
         }
@@ -289,13 +394,14 @@ const IdentifyUtils = {
         const result = {};
         (response.features || []).map(feature => {
             // Deduce layer name as far as possible from feature id
-            const id = feature.id || (feature.properties || {}).OBJECTID || uuidv1();
+            const id = feature.id || (feature.properties || {}).OBJECTID || uuidv4();
             if (result[layer.name] === undefined) {
                 result[layer.name] = [];
             }
             let geometry = feature.geometry;
-            if (geometry) {
-                geometry = VectorLayerUtils.reprojectGeometry(geometry, "EPSG:4326", geometrycrs); // GeoJSON always wgs84
+            if (geometry && response.crs) {
+                // Reproject geometry only if there is crs information in GetFeatureInfo response
+                geometry = VectorLayerUtils.reprojectGeometry(geometry, response.crs.properties?.name ?? "EPSG:4326", geometrycrs);
             }
             result[layer.name].push({
                 ...feature,
@@ -307,7 +413,7 @@ const IdentifyUtils = {
         });
         return result;
     },
-    parseGmlResponse(response, geometrycrs, posstr, layer) {
+    parseGmlResponse(response, geometrycrs, layer, posstr) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(response, "text/xml");
         const result = {};
@@ -337,6 +443,20 @@ const IdentifyUtils = {
             result[layer.name] = [{type: "text", text: response, id: posstr}];
         }
         return result;
+    },
+    parseGml3Response(response, geometrycrs, layer) {
+        const fmtGml3 = new ol.format.GML3();
+        const fmtGeoJson =  new ol.format.GeoJSON();
+        return {
+            [layer.name]: fmtGeoJson.writeFeaturesObject(fmtGml3.readFeatures(response))?.features ?? []
+        };
+    },
+    parseGml32Response(response, geometrycrs, layer) {
+        const fmtGml32 = new ol.format.GML32();
+        const fmtGeoJson =  new ol.format.GeoJSON();
+        return {
+            [layer.name]: fmtGeoJson.writeFeaturesObject(fmtGml32.readFeatures(response))?.features ?? []
+        };
     }
 };
 

@@ -5,3 +5,11 @@ div.theme-switcher-filter {
     color: var(--text-color);
     margin: 0 0.5em;
 }
+
+div.active-theme {
+    order: 0;
+}
+
+div.active-theme > span.icon {
+    margin-right: 0.25em;
+}

@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -14,17 +14,43 @@ import {
     REGISTER_WINDOW,
     UNREGISTER_WINDOW,
     RAISE_WINDOW,
-    SET_SPLIT_SCREEN
+    SET_SPLIT_SCREEN,
+    SET_MENU_MARGIN,
+    SET_TOPBAR_HEIGHT,
+    SET_BOTTOMBAR_HEIGHT
 } from '../actions/windows';
 
 const defaultState = {
     stacking: [],
     splitScreen: {},
     mapMargins: {
-        left: 0, top: 0, right: 0, bottom: 0
+        left: 0, outerLeft: 0, top: 0, right: 0, outerRight: 0, bottom: 0
     },
+    menuMargins: {
+        left: 0, right: 0
+    },
+    topbarHeight: 0,
+    bottombarHeight: 0,
     entries: {}
 };
+
+function computeMapMargins(splitScreen, menuMargins) {
+    const splitWindows = Object.values(splitScreen);
+    const innerSplitWindows = splitWindows.filter(entry => entry.splitTopAndBottomBar !== true);
+    const outerSplitWindows = splitWindows.filter(entry => entry.splitTopAndBottomBar === true);
+    const mapMargins = {
+        right: innerSplitWindows.filter(entry => entry.side === 'right').reduce((res, e) => Math.max(e.size, res), 0) + menuMargins.right,
+        outerRight: outerSplitWindows.filter(entry => entry.side === 'right').reduce((res, e) => Math.max(e.size, res), 0),
+        bottom: splitWindows.filter(entry => entry.side === 'bottom').reduce((res, e) => Math.max(e.size, res), 0),
+        left: innerSplitWindows.filter(entry => entry.side === 'left').reduce((res, e) => Math.max(e.size, res), 0) + menuMargins.left,
+        outerLeft: outerSplitWindows.filter(entry => entry.side === 'left').reduce((res, e) => Math.max(e.size, res), 0),
+        top: splitWindows.filter(entry => entry.side === 'top').reduce((res, e) => Math.max(e.size, res), 0)
+    };
+    return {
+        mapMargins,
+        splitTopAndBottomBar: outerSplitWindows.length > 0
+    };
+}
 
 export default function windows(state = defaultState, action) {
     switch (action.type) {
@@ -42,7 +68,13 @@ export default function windows(state = defaultState, action) {
             ...state,
             entries: {
                 ...state.entries,
-                [action.name]: {type: 'notification', text: action.text, notificationType: action.notificationType, sticky: action.sticky}
+                [action.name]: {
+                    type: 'notification',
+                    text: action.text,
+                    notificationType: action.notificationType,
+                    sticky: action.sticky,
+                    actions: action.actions
+                }
             }
         };
     }
@@ -90,21 +122,40 @@ export default function windows(state = defaultState, action) {
         } else {
             newSplitScreen[action.windowId] = {
                 side: action.side,
-                size: action.size
+                size: action.size,
+                splitTopAndBottomBar: action.splitTopAndBottomBar
             };
         }
-        const splitWindows = Object.values(newSplitScreen);
-        const mapMargins = {
-            right: splitWindows.filter(entry => entry.side === 'right').reduce((res, e) => Math.max(e.size, res), 0),
-            bottom: splitWindows.filter(entry => entry.side === 'bottom').reduce((res, e) => Math.max(e.size, res), 0),
-            left: splitWindows.filter(entry => entry.side === 'left').reduce((res, e) => Math.max(e.size, res), 0),
-            top: splitWindows.filter(entry => entry.side === 'top').reduce((res, e) => Math.max(e.size, res), 0)
-        };
         return {
             ...state,
             splitScreen: newSplitScreen,
-            mapMargins: mapMargins
+            ...computeMapMargins(newSplitScreen, state.menuMargins)
         };
+    }
+    case SET_MENU_MARGIN: {
+        const menuMargins =  {
+            right: action.right,
+            left: action.left
+        };
+        return {
+            ...state,
+            menuMargins: menuMargins,
+            ...computeMapMargins(state.splitScreen, menuMargins)
+        };
+    }
+    case SET_TOPBAR_HEIGHT: {
+        document.querySelector(':root').style.setProperty('--topbar-height', action.height + 'px');
+        if (action.height <= 0) {
+            return state;
+        }
+        return {...state, topbarHeight: action.height};
+    }
+    case SET_BOTTOMBAR_HEIGHT: {
+        document.querySelector(':root').style.setProperty('--bottombar-height', action.height + 'px');
+        if (action.height <= 0) {
+            return state;
+        }
+        return {...state, bottombarHeight: action.height};
     }
     default:
         return state;

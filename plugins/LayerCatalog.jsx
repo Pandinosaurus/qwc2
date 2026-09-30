@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,12 +8,18 @@
 
 import React from 'react';
 import {connect} from 'react-redux';
-import PropTypes from 'prop-types';
+
 import axios from 'axios';
+import {remove as removeDiacritics} from 'diacritics';
+import PropTypes from 'prop-types';
+
 import {setCurrentTask} from '../actions/task';
-import LayerCatalogWidget from '../components/widgets/LayerCatalogWidget';
 import ResizeableWindow from '../components/ResizeableWindow';
+import LayerCatalogWidget from '../components/widgets/LayerCatalogWidget';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
+import {registerSearchProvider, SearchResultType, unregisterSearchProvider} from '../utils/SearchProviders';
+
 import './style/LayerCatalog.css';
 
 
@@ -22,8 +28,13 @@ import './style/LayerCatalog.css';
  *
  * Configured through a catalog JSON containing a tree of external layer identifiers.
  *
- * For `wms` layers, `sublayers: false` denotes that the sublayer structure of the added layer should not
- * be exposed in the layer tree.
+ * For catalog entries containing a `wms` resource, you can specify `"asGroup": <true|false|"option">`, which behaves as follows:
+ *
+ * * `false`: imports the layer as a flat layer, without sublayer structure. This is the default behaviour for entries without sublayers if `asGroup` is not specified.
+ * * `true`:  imports the layer as a group, with sublayer structure. If the catalog entry has sublayers, the sublayer structure will be filtered to only include these sublayers.
+ * * `"option"`: imports the layer as a flat layer when clicking on the catalog entry, but displays an icon to optionally import the layer as a group layer. This is the default behaviour for entries with sublayers if `asGroup` is not specified.
+ *
+ * You can set a default fallback value for `asGroup` via the  `defaultAsGroupValue` `LayerCatalog` configuration option.
  *
  * Example:
  * ```json
@@ -32,11 +43,11 @@ import './style/LayerCatalog.css';
  *     {
  *       "title": "Öffentlicher Verkehr swissTLMRegio",
  *       "resource": "wms:http://wms.geo.admin.ch#ch.swisstopo.vec200-transportation-oeffentliche-verkehr",
- *       "sublayers": false
+ *       "asGroup": true
  *     },
  *     {
  *       "title": "Gewässerschutz",
- *        "resource": "wms:https://geo.so.ch/api/wms#ch.so.afu.gewaesserschutz[50]"
+ *       "resource": "wms:https://geo.so.ch/api/wms#ch.so.afu.gewaesserschutz[50]"
  *     },
  *     {
  *       "title": "Landeskarten",
@@ -50,6 +61,19 @@ import './style/LayerCatalog.css';
  *           "resource": "wms:http://wms.geo.admin.ch#ch.swisstopo.pixelkarte-farbe-pk100.noscale"
  *         }
  *       ]
+ *     },
+ *     {
+ *       "title": "Edit Demo",
+ *       "resource": "wms:https://demo.qwc.app/ows/qwc_demo#edit_demo",
+ *       "sublayers": [{
+ *         "title": "Edit Points",
+ *         "resource": "wms:https://demo.qwc.app/ows/qwc_demo#edit_points"
+ *       },
+ *       {
+ *         "title": "Edit Lines",
+ *         "resource": "wms:https://demo.qwc.app/ows/qwc_demo#edit_lines"
+ *       }],
+ *       "asGroup": "option"
  *     }
  *   ]
  * }
@@ -60,6 +84,8 @@ class LayerCatalog extends React.Component {
         active: PropTypes.bool,
         /** The URL to the catalog JSON file. */
         catalogUrl: PropTypes.string,
+        /** Optional default value for `asGroup`, with possible values as documented above.*/
+        defaultAsGroupValue: PropTypes.oneOfType([PropTypes.bool, PropTypes.string]),
         /** Default window geometry with size, position and docking status. Positive position values (including '0') are related to top (InitialY) and left (InitialX), negative values (including '-0') to bottom (InitialY) and right (InitialX). */
         geometry: PropTypes.shape({
             initialWidth: PropTypes.number,
@@ -71,7 +97,11 @@ class LayerCatalog extends React.Component {
         }),
         /** Whether to increase the indent size dynamically according to the current level (`true`) or keep the indent size constant (`false`). */
         levelBasedIndentSize: PropTypes.bool,
-        setCurrentTask: PropTypes.func
+        /** Whether to register a search provider which allows searching catalog layers through the global search field. */
+        registerCatalogSearchProvider: PropTypes.bool,
+        setCurrentTask: PropTypes.func,
+        /** Whether clicking the group name toggles the WMS group rather than loading the grouped layer. */
+        toggleGroupOnClick: PropTypes.bool
     };
     static defaultProps = {
         geometry: {
@@ -82,28 +112,46 @@ class LayerCatalog extends React.Component {
             initiallyDocked: false,
             side: 'left'
         },
-        levelBasedIndentSize: true
+        levelBasedIndentSize: true,
+        registerCatalogSearchProvider: true,
+        toggleGroupOnClick: false
     };
     state = {
-        catalog: null
+        catalog: null,
+        visible: false
     };
-    componentDidUpdate(prevProps) {
-        if (this.props.active && !prevProps.active && this.props.catalogUrl) {
-            axios.get(this.props.catalogUrl).then(this.setCatalog).catch(e => {
+    componentDidMount() {
+        if (this.props.catalogUrl) {
+            axios.get(MiscUtils.resolveAssetsPath(this.props.catalogUrl)).then(response => {
+                this.setState({
+                    catalog: response.data.catalog || []
+                });
+            }).catch(e => {
                 this.setState({catalog: []});
                 // eslint-disable-next-line
                 console.warn("Failed to load catalog: " + e);
             });
         }
+        if (this.props.registerCatalogSearchProvider) {
+            registerSearchProvider("catalogsearch", {
+                label: LocaleUtils.tr("layercatalog.windowtitle"),
+                onSearch: this.searchCatalog
+            });
+        }
     }
-    setCatalog = (response) => {
-        this.setState({
-            catalog: response.data.catalog || []
-        });
-        this.props.setCurrentTask("LayerTree");
-    };
+    componentWillUnmount() {
+        if (this.props.registerCatalogSearchProvider) {
+            unregisterSearchProvider("catalogsearch");
+        }
+    }
+    componentDidUpdate(prevProps) {
+        if (this.props.active && !prevProps.active) {
+            this.setState({visible: true});
+            this.props.setCurrentTask("LayerTree");
+        }
+    }
     render() {
-        if (!this.state.catalog) {
+        if (!this.state.visible) {
             return null;
         }
         return (
@@ -111,16 +159,56 @@ class LayerCatalog extends React.Component {
                 initialHeight={this.props.geometry.initialHeight} initialWidth={this.props.geometry.initialWidth}
                 initialX={this.props.geometry.initialX} initialY={this.props.geometry.initialY}
                 initiallyDocked={this.props.geometry.initiallyDocked}
-                onClose={this.onClose} title={LocaleUtils.trmsg("layercatalog.windowtitle")}
+                onClose={this.onClose} title={LocaleUtils.tr("layercatalog.windowtitle")}
             >
-                <div className="layer-catalog" role="body">
-                    <LayerCatalogWidget catalog={this.state.catalog} levelBasedIndentSize={this.props.levelBasedIndentSize} pendingRequests={0} />
+                <div className="layer-catalog">
+                    <LayerCatalogWidget catalog={this.state.catalog} defaultAsGroupValue={this.props.defaultAsGroupValue} levelBasedIndentSize={this.props.levelBasedIndentSize} pendingRequests={0} toggleGroupOnClick={this.props.toggleGroupOnClick} />
                 </div>
             </ResizeableWindow>
         );
     }
     onClose = () => {
-        this.setState({catalog: null});
+        this.setState({visible: false});
+    };
+    searchCatalog = (text, searchParams, callback) => {
+        const filter = new RegExp(removeDiacritics(text).replace(/[-[\]/{}()*+?.\\^$|]/g, "\\$&"), "i");
+        const results = [];
+        if (this.state.catalog) {
+            this.searchCatalogGroup(results, filter, this.state.catalog);
+        }
+        if (results.length > 0) {
+            callback({results: [{
+                id: "cataloglayers",
+                title: LocaleUtils.tr("layercatalog.windowtitle"),
+                type: SearchResultType.EXTERNALLAYER,
+                items: results
+            }]});
+        } else {
+            callback({results: []});
+        }
+    };
+    searchCatalogGroup = (results, filter, group) => {
+        group.forEach(entry => {
+            const type = entry.resource ? entry.resource.slice(0, entry.resource.indexOf(":")) : entry.type;
+            if (entry.sublayers) {
+                this.searchCatalogGroup(results, filter, entry.sublayers);
+            }
+            if (entry.sublayers && type !== "wms") {
+                return;
+            }
+            if (removeDiacritics(entry.title).match(filter)) {
+                results.push({
+                    id: "cataloglayer:" + results.length,
+                    text: entry.title,
+                    layer: entry,
+                    sublayers: entry.sublayers?.map?.((sublayer, idx) => ({
+                        id: "cataloglayer:" + results.length + ":" + idx,
+                        text: sublayer.title,
+                        layer: sublayer
+                    }))
+                });
+            }
+        });
     };
 }
 

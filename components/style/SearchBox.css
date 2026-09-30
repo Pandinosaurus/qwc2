@@ -1,27 +1,24 @@
 div.SearchBox {
-    flex: 1 1 auto;
     position: relative;
     display: flex;
-    height: 2em;
-    max-width: 70ch;
-    background-color: var(--input-bg-color);
-    color: var(--text-color);
 }
 
 div.searchbox-field {
     flex: 1 1 auto;
 }
 
-
 button.searchbox-filter-button {
     flex: 0 0 auto;
     border-left-width: 0;
-    padding: 0 0.25em 0 0.5em;
+    padding: 0 1em 0 0.5em;
+    position: relative;
 }
 
-button.searchbox-filter-button > span.icon:last-child {
-    font-size: 75%;
-    margin-top: 1em;
+button.searchbox-filter-button > span.icon-chevron-down {
+    font-size: 80%;
+    position: absolute;
+    bottom: 0.25em;
+    right: 0.25em;
 }
 
 div.searchbox-field > div.spinner {
@@ -30,19 +27,8 @@ div.searchbox-field > div.spinner {
 }
 
 div.searchbox-results {
-    position: absolute;
-    left: 0;
-    top: 100%;
-    width: 100%;
-    max-height: calc(100vh - 5em);
-    max-height: calc(var(--vh, 1vh) * 100 - 5em);
-    background-color: var(--list-bg-color);
-    border-left: 1px solid var(--border-color);
-    border-right: 1px solid var(--border-color);
-    border-bottom: 1px solid var(--border-color);
-    box-shadow: 0px 2px 4px rgba(136, 136, 136, 0.5);
     overflow-x: hidden;
-    overflow-y: auto;
+    border-radius: 0px 0px var(--border-radius) var(--border-radius);
 }
 
 div.searchbox-results-section-title {
@@ -60,7 +46,7 @@ div.searchbox-results-section-title > span.icon {
 }
 
 div.searchbox-result {
-    padding: 0.125em 0.5em;
+    padding: 0.25em 0.25em;
     display: flex;
     align-items: center;
 }
@@ -71,27 +57,18 @@ div.searchbox-noresults {
     color: var(--text-color-disabled);
 }
 
-div.searchbox-result:hover {
-    background-color: var(--list-item-bg-color-hover);
-    color: var(--list-item-text-color-hover);
-}
-
 div.searchbox-result-expandedinfo {
     background-color: var(--list-item-bg-color-hover);
     color: var(--list-item-text-color-hover);
 }
 
-div.searchbox-result > img {
-    flex: 0 0 1.75em;
-    height: 1.5em;
-}
-
 div.searchbox-result > span.icon {
-    flex: 0 0 1em;
+    flex: 0 0 1.5em;
 }
 
-img.searchbox-result-thumbnail {
-    margin-right: 0.25em;
+.searchbox-result-thumbnail {
+    flex: 0 0 1.5em;
+    height: 1.5em;
 }
 
 span.searchbox-result-openicon {
@@ -124,11 +101,6 @@ div.searchbox-more-results {
     align-items: center;
 }
 
-div.searchbox-result-group {
-    margin-left: 1em;
-    border-left: 1px solid var(--list-item-bg-color-hover);
-}
-
 div.searchbox-filter-options {
     position: absolute;
     left: 0;
@@ -139,7 +111,6 @@ div.searchbox-filter-options {
     border-right: 1px solid var(--border-color);
     border-bottom: 1px solid var(--border-color);
     box-shadow: 0px 2px 4px rgba(136, 136, 136, 0.5);
-    padding: 0.25em;
 }
 
 div.searchbox-filter-options > table {
@@ -147,7 +118,7 @@ div.searchbox-filter-options > table {
 }
 
 div.searchbox-filter-options > table td {
-    padding: 0.125em 0.25em;
+    padding: 0.25em;
     white-space: nowrap;
 }
 
@@ -160,23 +131,18 @@ div.searchbox-filter-options > table td:last-child > div.combobox {
     height: 2em;
 }
 
-div.searchbox-filter-options-geometry {
-    display: flex;
-    align-items: center;
-}
-
-div.searchbox-filter-options-geometry > div.ButtonBar {
-    flex: 0 0 auto;
-}
-
 div.searchbox-filter-options-geometry > div.combobox {
     flex: 1 1 auto;
-    margin-left: -1px;
-    z-index: 1;
     height: 2em;
 }
 
-div.searchbox-filter-options-geometry > button {
-    margin-left: 0.25em;
-    flex: 0 0 auto;
+.searchbox-entry-link {
+    margin-right: 0.5em;
+    margin-left: 0.5em;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+ 
+.searchbox-entry-link:hover {
+    opacity: 1;
 }

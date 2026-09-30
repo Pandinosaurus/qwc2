@@ -1,8 +1,7 @@
 #Editing div.editing-body {
     padding: 0.25em;
     position: relative;
-    max-height: calc(100vh - 8.25em); /* viewport - topbar - bottombar - sidebar_titlebar*/
-    max-height: calc(var(--vh, 1vh) * 100 - 8.25em); /* viewport - topbar - bottombar - sidebar_titlebar*/
+    min-height: 0;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -14,6 +13,10 @@
     padding: 0.25em;
 }
 
+#Editing div.editing-body > div:not(:last-child) {
+    margin-bottom: 0.25em;
+}
+
 #Editing div.editing-body > div.editing-layer-selection,
 #Editing div.editing-body > div.editing-feature-selection,
 #Editing div.editing-body > div.ButtonBar {
@@ -21,7 +24,7 @@
 }
 
 #Editing div.editing-body > div.AttributeForm {
-    margin-top: 0.5em;
+    margin-top: 0.25em;
     padding-top: 0.5em;
     border-top: 1px solid var(--border-color);
     flex: 1 1 auto;
@@ -38,25 +41,36 @@
     cursor: not-allowed;
 }
 
-#Editing div.editing-drawpick-results {
-    border: 1px solid var(--border-color);
-    margin-top: -0.25em;
-    background-color: var(--list-bg-color);
+.editing-clone-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
 }
 
-#Editing div.editing-drawpick-results > div {
-    padding: 0.25em;
+.editing-clone-header {
+    font-weight: bold;
+    margin-bottom: 0.25em;
+}
+
+.editing-clone-table {
+    margin-top: calc(-0.25em - 1px);
+    background: var(--list-bg-color);
+    border: 1px solid var(--border-color);
+    width: 100%;
+    table-layout: fixed;
+}
+
+.editing-clone-table td {
+    padding: 0.125em 0.25em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    width: 50%;
+}
+
+.editing-clone-attribute {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
     cursor: pointer;
-}
-
-#Editing div.editing-drawpick-results > div:nth-child(even) {
-    background-color: var(--list-item-bg-color-even);
-}
-
-#Editing div.editing-drawpick-results > div:hover {
-    background-color: var(--list-item-bg-color-hover);
-    color: var(--list-item-text-color-hover);
 }

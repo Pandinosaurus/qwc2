@@ -1,5 +1,5 @@
 /**
- * Copyright 2019-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,8 +7,10 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
-import {v1 as uuidv1} from 'uuid';
+import {v4 as uuidv4} from 'uuid';
+
 import './style/SuggestionInput.css';
 
 
@@ -25,7 +27,7 @@ export default class SuggestionInput extends React.Component {
     };
     constructor(props) {
         super(props);
-        this.datalistid = uuidv1();
+        this.datalistid = uuidv4();
     }
     render() {
         return (

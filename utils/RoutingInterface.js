@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,7 +8,8 @@
 
 
 import axios from 'axios';
-import {v1 as uuidv1} from 'uuid';
+import {v4 as uuidv4} from 'uuid';
+
 import ConfigUtils from './ConfigUtils';
 import LocaleUtils from './LocaleUtils';
 import VectorLayerUtils from './VectorLayerUtils';
@@ -207,7 +208,7 @@ function computeIsochrone(costing, locations, contourOptions, options, callback)
         id: "valhalla_isochrone"
     };
     const serviceUrl = ConfigUtils.getConfigProp("routingServiceUrl").replace(/\/$/, '');
-    const reqId = uuidv1();
+    const reqId = uuidv4();
     ValhallaSession.reqId = reqId;
     ValhallaSession.pending = locations.length;
     locations.forEach(location => {

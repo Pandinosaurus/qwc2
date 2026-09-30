@@ -1,22 +1,30 @@
+#!/usr/bin/env node
+
 const webfontsGenerator = require('@furkot/webfonts-generator');
+const fs = require('fs');
 const glob = require('glob');
 const mkdirp = require('mkdirp');
-const fs = require('fs');
 const path = require('path');
 
 const readJSON = (filename) => {
     try {
         return JSON.parse(fs.readFileSync(process.cwd() + filename, "utf8"));
-    } catch (e) {
+    } catch {
         return {};
     }
 };
 
-const workspaces = readJSON('/package.json').workspaces || [];
+// Determine workspaces / dependencies
+const packageJson = readJSON('/package.json');
+const workspaces = packageJson.workspaces || [];
+const qwcDeps = Object.keys(packageJson.dependencies ?? {}).filter(dep => dep.startsWith("qwc"));
 
 let icons = [];
 for (const workspace of workspaces) {
     icons = icons.concat(glob.sync(workspace + "/icons/*.svg"));
+}
+for (const qwcDep of qwcDeps) {
+    icons = icons.concat(glob.sync('node_modules/' + qwcDep + '/icons/*.svg'));
 }
 icons = icons.concat(glob.sync("icons/*.svg"));
 
@@ -26,6 +34,7 @@ const uniqueIcons = new Set();
 icons = icons.filter(icon => {
     const iconName = path.basename(icon);
     if (uniqueIcons.has(iconName)) {
+        // eslint-disable-next-line
         console.log("* " + icon + " was overriden");
         return false;
     }
@@ -45,10 +54,10 @@ webfontsGenerator({
     },
     types: ['woff'],
     fontHeight: 1000
-}, (error) => {
-    if (error) {
-        console.log('Fail!', error);
-    } else {
+}).then(() => {
+    // eslint-disable-next-line
         console.log('Done!');
-    }
+}).catch(e => {
+    // eslint-disable-next-line
+    console.log('Fail!', e);
 });

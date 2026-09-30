@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -20,8 +20,7 @@ export const ZOOM_TO_EXTENT = 'ZOOM_TO_EXTENT';
 export const ZOOM_TO_POINT = 'ZOOM_TO_POINT';
 export const CHANGE_ROTATION = 'CHANGE_ROTATION';
 export const TOGGLE_MAPTIPS = 'TOGGLE_MAPTIPS';
-export const SET_TOPBAR_HEIGHT = 'SET_TOPBAR_HEIGHT';
-export const SET_BOTTOMBAR_HEIGHT = 'SET_BOTTOMBAR_HEIGHT';
+export const SET_DISPLAY_CRS = 'SET_DISPLAY_CRS';
 export const SET_SNAPPING_CONFIG = 'SET_SNAPPING_CONFIG';
 
 export function changeMapView(center, zoom, bbox, size, mapStateSource, projection) {
@@ -44,12 +43,13 @@ export function changeMapView(center, zoom, bbox, size, mapStateSource, projecti
  *             or
  *               {bounds: [xmin, ymin, xmax, ymax], crs: ...}
  */
-export function configureMap(crs, scales, view) {
+export function configureMap(crs, scales, view, defaultdisplaycrs) {
     return {
         type: CONFIGURE_MAP,
         crs,
         scales,
-        view
+        view,
+        defaultdisplaycrs
     };
 }
 
@@ -68,29 +68,33 @@ export function changeZoomLevel(zoomLvl, mapStateSource) {
     };
 }
 
-export function panTo(pos, crs) {
+export function panTo(pos, crs, rotation = undefined) {
     return {
         type: PAN_TO,
         pos,
-        crs
+        crs,
+        rotation
     };
 }
 
-export function zoomToExtent(extent, crs, zoomOffset = 0) {
+export function zoomToExtent(extent, crs, zoomOffset = 0, minZoom = undefined, maxZoom = undefined) {
     return {
         type: ZOOM_TO_EXTENT,
         extent,
         crs,
-        zoomOffset
+        zoomOffset,
+        minZoom,
+        maxZoom
     };
 }
 
-export function zoomToPoint(pos, zoom, crs) {
+export function zoomToPoint(pos, zoom, crs, rotation = undefined) {
     return {
         type: ZOOM_TO_POINT,
         pos,
         zoom,
-        crs
+        crs,
+        rotation
     };
 }
 
@@ -108,24 +112,17 @@ export function toggleMapTips(active) {
     };
 }
 
-export function setTopbarHeight(height) {
-    return {
-        type: SET_TOPBAR_HEIGHT,
-        height
-    };
-}
-
-export function setBottombarHeight(height) {
-    return {
-        type: SET_BOTTOMBAR_HEIGHT,
-        height
-    };
-}
-
 export function setSnappingConfig(enabled, active) {
     return {
         type: SET_SNAPPING_CONFIG,
         enabled: enabled,
         active: active
+    };
+}
+
+export function setDisplayCrs(displayCrs) {
+    return {
+        type: SET_DISPLAY_CRS,
+        displayCrs: displayCrs
     };
 }

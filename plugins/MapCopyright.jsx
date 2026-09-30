@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,11 +7,17 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
+import ReactDOM from 'react-dom';
 import {connect} from 'react-redux';
+
 import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+
+import {MapContainerPortalContext} from '../components/PluginsContainer';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
+
 import './style/MapCopyright.css';
 
 
@@ -19,14 +25,15 @@ import './style/MapCopyright.css';
  * Displays layer attributions in the bottom right corner of the map.
  */
 class MapCopyright extends React.Component {
+    static contextType = MapContainerPortalContext;
+
     static propTypes = {
         layers: PropTypes.array,
         map: PropTypes.object,
-        mapMargins: PropTypes.object,
         /** Whether to prepend the layer name to the attribution string. */
         prefixCopyrightsWithLayerNames: PropTypes.bool,
         /** Whether to only display the attribution of the theme, omitting external layers. */
-        showThemeCopyrightOnly: PropTypes.bool,
+        showThemeCopyrightOnly: PropTypes.bool
     };
     state = {
         currentCopyrights: {}
@@ -45,23 +52,17 @@ class MapCopyright extends React.Component {
             if (value.title) {
                 return (<span key={key}><a href={key} rel="noreferrer" target="_blank">{this.layerNames(value.layers) + value.title}</a></span>);
             } else {
-                return (<span key={key}>{this.layerNames(value.layers)}<span dangerouslySetInnerHTML={{__html: key}} /></span>);
+                return (<span key={key}>{this.layerNames(value.layers)}<span dangerouslySetInnerHTML={{__html: MiscUtils.sanitizeHtml(key)}} /></span>);
             }
         });
         if (isEmpty(copyrights)) {
             return null;
         }
-        const right = this.props.mapMargins.right;
-        const bottom = this.props.mapMargins.bottom;
-        const style = {
-            right: 'calc(0.25em + ' + right + 'px)',
-            bottom: 'calc(3.4em + ' + bottom + 'px)'
-        };
-        return (
-            <div id="MapCopyright" style={style}>
+        return ReactDOM.createPortal((
+            <div className="MapCopyright">
                 {copyrights}
             </div>
-        );
+        ), this.context);
     }
     layerNames = (layers) => {
         if (!this.props.prefixCopyrightsWithLayerNames) {
@@ -74,8 +75,7 @@ class MapCopyright extends React.Component {
 
 const selector = (state) => ({
     layers: state.layers.flat,
-    map: state.map,
-    mapMargins: state.windows.mapMargins
+    map: state.map
 });
 
 export default connect(selector, {})(MapCopyright);

@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,46 +8,98 @@
  */
 
 import ol from 'openlayers';
+
 import FeatureStyles from '../../../utils/FeatureStyles';
+
+
+function featureFromFeatureObj(format, featureObj, options, mapCrs, segmentize) {
+    const feature = format.readFeature({...featureObj, type: "Feature"});
+    let featureCrs = featureObj.crs ?? options.projection ?? mapCrs;
+    if (featureCrs.type === "name") {
+        featureCrs = featureCrs.properties.name;
+    }
+    if (featureCrs !== mapCrs) {
+        feature.getGeometry()?.transform(featureCrs, mapCrs);
+    }
+    if (featureObj.circleParams && !segmentize) {
+        feature.setGeometry(
+            new ol.geom.Circle(featureObj.circleParams.center, featureObj.circleParams.radius)
+        );
+    }
+    const featureStyleName = featureObj.styleName || options.styleName;
+    const featureStyleOptions = {...options.styleOptions, ...featureObj.styleOptions};
+    feature.set('styleName', featureStyleName);
+    feature.set('styleOptions', featureStyleOptions);
+    feature.set('circleParams', featureObj.circleParams);
+    feature.set('shape', featureObj.shape);
+    feature.set('measurements', featureObj.measurements);
+    if (featureStyleName) {
+        feature.setStyle(FeatureStyles[featureStyleName](feature, featureStyleOptions));
+    }
+    return feature;
+}
+
+export function createFeatures(options, mapCrs, segmentize = false) {
+    const format = new ol.format.GeoJSON();
+    return (options.features || []).map(featureObj => {
+        return featureFromFeatureObj(format, featureObj, options, mapCrs, segmentize);
+    });
+}
+
+export function updateFeatures(source, newOptions, oldOptions, mapCrs, segmentize = false) {
+    const format = new ol.format.GeoJSON();
+    const newIds = new Set(newOptions.features.map(f => f.id));
+    const oldIds = new Set(oldOptions.features.map(f => f.id));
+
+    // Remove removed features
+    [...oldIds].filter(id => !newIds.has(id)).forEach(id => {
+        const feature = source.getFeatureById(id);
+        if (feature) {
+            source.removeFeature(feature);
+        }
+    });
+
+    // Add / update features
+    const oldFeaturesMap = (oldOptions.features || []).reduce((res, f) => ({...res, [f.id]: f}), {});
+    const newFeatures = [];
+    for (const featureObj of newOptions.features) {
+        if (oldFeaturesMap[featureObj.id] && oldFeaturesMap[featureObj.id] === featureObj) {
+            // Unchanged, continue
+            continue;
+        }
+        if (oldFeaturesMap[featureObj.id] && oldFeaturesMap[featureObj.id] !== featureObj) {
+            // Changed, remove
+            const oldFeature = source.getFeatureById(featureObj.id);
+            if (oldFeature) {
+                source.removeFeature(oldFeature);
+            }
+        }
+        // Add new
+        newFeatures.push(featureFromFeatureObj(format, featureObj, newOptions, mapCrs, segmentize));
+    }
+    if (newFeatures) {
+        source.addFeatures(newFeatures);
+    }
+}
+
+export function featureStyleFunction(options) {
+    return (feature => {
+        const styleName = options.styleName || 'default';
+        const styleOptions = options.styleOptions || {};
+        return FeatureStyles[styleName](feature, styleOptions);
+    });
+}
 
 export default {
     create: (options, map) => {
         const source = new ol.source.Vector();
-        const format = new ol.format.GeoJSON();
         const mapCrs = map.getView().getProjection().getCode();
 
-        const features = (options.features || []).reduce((collection, feature) => {
-            const featureObject = format.readFeatures({...feature, type: "Feature"});
-            featureObject.forEach(f => {
-                let featureCrs = feature.crs ?? options.projection ?? mapCrs;
-                if (featureCrs.type === "name") {
-                    featureCrs = featureCrs.properties.name;
-                }
-                if (featureCrs !== mapCrs) {
-                    f.getGeometry()?.transform(featureCrs, mapCrs);
-                }
-                const featureStyleName = feature.styleName || options.styleName;
-                const featureStyleOptions = {...options.styleOptions, ...feature.styleOptions};
-                f.set('styleName', featureStyleName);
-                f.set('styleOptions', featureStyleOptions);
-                f.set('circleParams', feature.circleParams);
-                f.set('shape', feature.shape);
-                f.set('measurements', feature.measurements);
-                if (featureStyleName) {
-                    f.setStyle(FeatureStyles[featureStyleName](f, featureStyleOptions));
-                }
-            });
-            return collection.concat(featureObject);
-        }, []);
+        const features = createFeatures(options, mapCrs);
         source.addFeatures(features);
         const vectorLayer = new ol.layer.Vector({
-            msId: options.id,
             source: source,
-            style: options.styleFunction || (feature => {
-                const styleName = options.styleName || 'default';
-                const styleOptions = options.styleOptions || {};
-                return FeatureStyles[styleName](feature, styleOptions);
-            })
+            style: options.styleFunction || featureStyleFunction(options)
         });
         return vectorLayer;
     },
@@ -55,72 +107,12 @@ export default {
         const mapCrs = map.getView().getProjection().getCode();
 
         if (newOptions.styleName !== oldOptions.styleName || newOptions.styleOptions !== oldOptions.styleOptions) {
-            layer.setStyle(feature => {
-                const styleName = newOptions.styleName || 'default';
-                const styleOptions = newOptions.styleOptions || {};
-                return FeatureStyles[styleName](feature, styleOptions);
-            });
+            layer.setStyle(featureStyleFunction(newOptions));
         } else if (newOptions.styleFunction !== oldOptions.styleFunction) {
             layer.setStyle(newOptions.styleFunction);
         }
         if (newOptions.features !== oldOptions.features) {
-            const format = new ol.format.GeoJSON();
-            const source = layer.getSource();
-
-            const oldFeaturesMap = (oldOptions.features || []).reduce((res, f) => {
-                res[f.id] = f; return res;
-            }, {});
-            const newIds = new Set(newOptions.features.map(f => f.id));
-            const removed = Object.keys(oldFeaturesMap).filter(id => !newIds.has(id));
-
-            // Remove removed features
-            for (const id of removed) {
-                const feature = source.getFeatureById(id);
-                if (feature) {
-                    source.removeFeature(feature);
-                }
-            }
-
-            // Add / update features
-            let newFeatureObjects = [];
-            for (const feature of newOptions.features) {
-                if (oldFeaturesMap[feature.id] && oldFeaturesMap[feature.id] === feature) {
-                    // Unchanged, continue
-                    continue;
-                }
-                if (oldFeaturesMap[feature.id] && oldFeaturesMap[feature.id] !== feature) {
-                    // Changed, remove
-                    const oldFeature = source.getFeatureById(feature.id);
-                    if (oldFeature) {
-                        source.removeFeature(oldFeature);
-                    }
-                }
-                // Add new
-                const featureObject = format.readFeatures({...feature, type: "Feature"});
-                featureObject.forEach(f => {
-                    let featureCrs = feature.crs ?? newOptions.projection ?? mapCrs;
-                    if (featureCrs.type === "name") {
-                        featureCrs = featureCrs.properties.name;
-                    }
-                    if (featureCrs !== mapCrs) {
-                        f.getGeometry()?.transform(featureCrs, mapCrs);
-                    }
-                    const featureStyleName = feature.styleName || newOptions.styleName;
-                    const featureStyleOptions = {...newOptions.styleOptions, ...feature.styleOptions};
-                    f.set('styleName', featureStyleName);
-                    f.set('styleOptions', featureStyleOptions);
-                    f.set('circleParams', feature.circleParams);
-                    f.set('shape', feature.shape);
-                    f.set('measurements', feature.measurements);
-                    if (featureStyleName) {
-                        f.setStyle(FeatureStyles[featureStyleName](f, featureStyleOptions));
-                    }
-                });
-                newFeatureObjects = newFeatureObjects.concat(featureObject);
-            }
-            if (newFeatureObjects) {
-                source.addFeatures(newFeatureObjects);
-            }
+            updateFeatures(layer.getSource(), newOptions, oldOptions, mapCrs);
         } else if ((oldOptions.rev || 0) !== (newOptions.rev || 0)) {
             layer.getSource().changed();
         }

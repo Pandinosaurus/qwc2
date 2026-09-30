@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,28 +7,36 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
 import axios from 'axios';
-import isEmpty from 'lodash.isempty';
+import dayjs from 'dayjs';
 import FileSaver from 'file-saver';
 import formDataEntries from 'formdata-json';
+import JSZip from 'jszip';
+import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+
 import {LayerRole, addLayerFeatures, clearLayer} from '../actions/layers';
-import {changeRotation, panTo} from '../actions/map';
+import {setSnappingConfig} from '../actions/map';
 import Icon from '../components/Icon';
-import InputContainer from '../components/InputContainer';
 import PickFeature from '../components/PickFeature';
-import PrintFrame from '../components/PrintFrame';
+import PrintSelection from '../components/PrintSelection';
 import ResizeableWindow from '../components/ResizeableWindow';
 import SideBar from '../components/SideBar';
-import Spinner from '../components/Spinner';
+import EditableSelect from '../components/widgets/EditableSelect';
+import InputContainer from '../components/widgets/InputContainer';
+import NumberInput from '../components/widgets/NumberInput';
+import Spinner from '../components/widgets/Spinner';
 import ToggleSwitch from '../components/widgets/ToggleSwitch';
+import ConfigUtils from '../utils/ConfigUtils';
 import CoordinatesUtils from '../utils/CoordinatesUtils';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import MapUtils from '../utils/MapUtils';
 import MiscUtils from '../utils/MiscUtils';
 import VectorLayerUtils from '../utils/VectorLayerUtils';
+
 import './style/Print.css';
 
 
@@ -43,15 +51,18 @@ class Print extends React.Component {
         addLayerFeatures: PropTypes.func,
         /** Whether to allow GeoPDF export. Requires QGIS Server 3.32 or newer. */
         allowGeoPdfExport: PropTypes.bool,
-        changeRotation: PropTypes.func,
         clearLayer: PropTypes.func,
         /** The default print dpi.  */
         defaultDpi: PropTypes.number,
         /** The factor to apply to the map scale to determine the initial print map scale.  */
         defaultScaleFactor: PropTypes.number,
-        /** Whether to display the map rotation control. */
+        /** Show an option to print a series of extents. */
+        displayPrintSeries: PropTypes.bool,
+        /** Whether to display the printing rotation control. */
         displayRotation: PropTypes.bool,
-        /** Export layout format mimetypes. If empty, supported formats are listed. If format is not supported by QGIS Server, print will fail */
+        /** Template for the name of the generated files when downloading. Can contain the placeholders `{layout}`, `{username}`, `{tenant}`, `{theme}`, `{themeTitle}`, `{timestamp}`. */
+        fileNameTemplate: PropTypes.string,
+        /** Export layout format mimetypes. If format is not supported by QGIS Server, print will fail. */
         formats: PropTypes.arrayOf(PropTypes.string),
         /** Whether the grid is enabled by default. */
         gridInitiallyEnabled: PropTypes.bool,
@@ -60,62 +71,93 @@ class Print extends React.Component {
         /** Whether to display the print output in an inline dialog instead triggering a download. */
         inlinePrintOutput: PropTypes.bool,
         layers: PropTypes.array,
+        /** Hide layouts which begin with this prefix, or with any of the prefixes in the specified list. */
+        layoutHidePrefix: PropTypes.oneOfType([PropTypes.string, PropTypes.arrayOf(PropTypes.string)]),
+        /** Layout sort order, asc or desc. */
+        layoutSortOrder: PropTypes.string,
         map: PropTypes.object,
-        panTo: PropTypes.func,
+        /** Whether to allow moving the extent while selecting the print series. */
+        movePrintSeries: PropTypes.bool,
+        /** Whether to cut off any layout path prefixes (i.e. as in `subdir/Layout Name`) from the layout titles displayed in selection combo. */
+        omitLayoutPathsFromTitle: PropTypes.bool,
         /** Whether to print external layers. Requires QGIS Server 3.x! */
         printExternalLayers: PropTypes.bool,
+        /** Whether to print highlights on the map, e.g. selected features or redlining. */
+        printMapHighlights: PropTypes.bool,
+        /** Restrict print scale to list of predefined print scales, if any. */
+        restrictToPrintScales: PropTypes.bool,
         /** Scale factor to apply to line widths, font sizes, ... of redlining drawings passed to GetPrint.  */
         scaleFactor: PropTypes.number,
+        setIdentifyEnabled: PropTypes.func,
+        setSnappingConfig: PropTypes.func,
         /** The side of the application on which to display the sidebar. */
         side: PropTypes.string,
         theme: PropTypes.object
     };
     static defaultProps = {
-        printExternalLayers: true,
-        inlinePrintOutput: false,
-        scaleFactor: 1.9, // Experimentally determined...
         defaultDpi: 300,
         defaultScaleFactor: 0.5,
+        displayPrintSeries: false,
         displayRotation: true,
+        fileNameTemplate: '{theme}_{timestamp}',
         gridInitiallyEnabled: false,
+        layoutSortOrder: 'asc',
+        movePrintSeries: false,
+        formats: ['application/pdf', 'image/jpeg', 'image/png', 'image/svg'],
+        inlinePrintOutput: false,
+        printExternalLayers: true,
+        printMapHighlights: true,
+        scaleFactor: 1.9, // Experimentally determined...
         side: 'right'
     };
     state = {
+        center: null,
+        extents: [],
         layout: null,
-        scale: null,
+        layouts: [],
+        rotation: 0,
+        scale: 0,
         dpi: 300,
-        initialRotation: 0,
         grid: false,
         legend: false,
-        rotationNull: false,
         minimized: false,
         printOutputVisible: false,
         outputLoaded: false,
         printing: false,
         atlasFeatures: [],
         geoPdf: false,
-        availableFormats: [],
         selectedFormat: "",
-        printOutputData: undefined
+        printOutputData: undefined,
+        pdfData: null,
+        pdfDataUrl: null,
+        downloadMode: "onepdf",
+        printSeriesEnabled: false,
+        printSeriesOverlap: 0,
+        printSeriesSelected: []
     };
     constructor(props) {
         super(props);
         this.printForm = null;
         this.state.grid = props.gridInitiallyEnabled;
-        this.fixedMapCenter = null;
+        this.state.dpi = props.defaultDpi;
+        this.state.selectedFormat = props.formats[0];
     }
     componentDidUpdate(prevProps, prevState) {
         if (prevProps.theme !== this.props.theme) {
             if (this.props.theme && !isEmpty(this.props.theme.print)) {
-                const layouts = this.props.theme.print.filter(l => l.map).sort((a, b) => {
-                    return a.name.localeCompare(b.name, undefined, {numeric: true});
+                const sortDir = this.props.layoutSortOrder === "desc" ? -1 : 1;
+                const hidePrefixes = [this.props.layoutHidePrefix ?? []].flat();
+                const layouts = this.props.theme.print.filter(l => {
+                    const name = l.name.split('/').pop();
+                    return l.map && !hidePrefixes.some(prefix => name.startsWith(prefix));
+                }).sort((a, b) => {
+                    return sortDir * a.name.split('/').pop().localeCompare(b.name.split('/').pop(), undefined, {numeric: true});
                 });
                 const layout = layouts.find(l => l.default) || layouts[0];
-                this.setState({layout: layout, atlasFeatures: []});
+                this.setState({layouts: layouts, layout: layout, atlasFeatures: []});
             } else {
-                this.setState({layout: null, atlasFeatures: []});
+                this.setState({layouts: [], layout: null, atlasFeatures: []});
             }
-            this.fixedMapCenter = null;
         }
         if (this.state.atlasFeatures !== prevState.atlasFeatures) {
             if (!isEmpty(this.state.atlasFeatures)) {
@@ -129,118 +171,90 @@ class Print extends React.Component {
                 this.props.clearLayer("print-pick-selection");
             }
         }
+        if (this.state.printSeriesEnabled && this.state.selectedFormat !== 'application/pdf') {
+            this.setState({ selectedFormat: 'application/pdf' });
+        }
     }
     onShow = () => {
-        const defaultFormats = ['application/pdf', 'image/jpeg', 'image/png', 'image/svg'];
-        const availableFormats = !isEmpty(this.props.formats) ? this.props.formats : defaultFormats;
-        const selectedFormat = availableFormats[0];
+        // setup initial extent
         let scale = Math.round(MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom) * this.props.defaultScaleFactor);
-        if (this.props.theme.printScales && this.props.theme.printScales.length > 0) {
-            let closestVal = Math.abs(scale - this.props.theme.printScales[0]);
-            let closestIdx = 0;
-            for (let i = 1; i < this.props.theme.printScales.length; ++i) {
-                const currVal = Math.abs(scale - this.props.theme.printScales[i]);
-                if (currVal < closestVal) {
-                    closestVal = currVal;
-                    closestIdx = i;
-                }
-            }
-            scale = this.props.theme.printScales[closestIdx];
+        if (this.props.theme.printScales?.length > 0) {
+            scale = this.props.theme.printScales.reduce((prev, curr) => {
+                return Math.abs(curr - scale) < Math.abs(prev - scale) ? curr : prev;
+            });
         }
-        this.setState({
-            scale: scale,
-            initialRotation: this.props.map.bbox.rotation,
-            dpi: this.props.defaultDpi,
-            availableFormats: availableFormats,
-            selectedFormat: selectedFormat
-        });
+        const bounds = this.props.map.bbox.bounds;
+        const center = this.state.center || [0, 0];
+        const resetCenter = (center[0] < bounds[0]) || (center[0] > bounds[2]) || (center[1] < bounds[1]) || (center[1] > bounds[3]);
+        const resetScale = (this.state.scale / scale < 0.01) || (this.state.scale / scale > 10);
+        if (resetCenter || resetScale) {
+            this.setState({
+                center: null,
+                rotation: 0,
+                scale: scale
+            });
+        }
+        this.props.setSnappingConfig(false, false);
     };
     onHide = () => {
-        this.props.changeRotation(this.state.initialRotation);
-        this.setState({minimized: false, scale: null, atlasFeatures: []});
+        this.setState({minimized: false, printSeriesEnabled: false, atlasFeatures: []});
     };
-    renderBody = () => {
+    renderBody = (themeLayer) => {
         if (!this.state.layout) {
             return (<div className="print-body" role="body">{LocaleUtils.tr("print.nolayouts")}</div>);
         }
-        const themeLayers = this.props.layers.filter(layer => layer.role === LayerRole.THEME);
-        if (!this.props.theme || (!this.props.printExternalLayers && isEmpty(themeLayers))) {
+        const haveThemeLayers = this.props.layers.find(layer => layer.role === LayerRole.THEME) !== undefined;
+        if (!this.props.theme || (!this.props.printExternalLayers && !haveThemeLayers)) {
             return (<div className="print-body" role="body">{LocaleUtils.tr("print.notheme")}</div>);
         }
 
-        const formvisibility = 'hidden';
-        const printDpi = parseInt(this.state.dpi, 10);
-        const mapCrs = this.props.map.projection;
-        const version = this.props.theme.version;
-
         const mapName = this.state.layout.map.name;
-        const printParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, this.state.scale, mapCrs, this.props.printExternalLayers);
+        const printLegend = this.state.layout.legendLayout;
 
-        let extent = this.computeCurrentExtent();
-        extent = (CoordinatesUtils.getAxisOrder(mapCrs).substr(0, 2) === 'ne' && version === '1.3.0') ?
-            extent[1] + "," + extent[0] + "," + extent[3] + "," + extent[2] :
-            extent.join(',');
-        if (!isEmpty(this.state.atlasFeatures)) {
-            extent = "";
-        }
-        let rotation = "";
-        if (!this.state.rotationNull) {
-            rotation = this.props.map.bbox ? Math.round(this.props.map.bbox.rotation / Math.PI * 180) : 0;
-        }
-        let scaleChooser = (<input min="1" name={mapName + ":scale"} onChange={this.changeScale} role="input" type="number" value={this.state.scale || ""}/>);
-
-        if (this.props.theme.printScales && this.props.theme.printScales.length > 0) {
-            scaleChooser = (
-                <select name={mapName + ":scale"} onChange={this.changeScale} role="input" value={this.state.scale || ""}>
-                    {this.props.theme.printScales.map(scale => (<option key={scale} value={scale}>{scale}</option>))}
-                </select>
-            );
-        }
+        const formattedExtent = !isEmpty(this.state.atlasFeatures) ? "" : (this.formatExtent(this.state.extents.at(0) ?? [0, 0, 0, 0]));
         let resolutionChooser = null;
         let resolutionInput = null;
         if (!isEmpty(this.props.theme.printResolutions)) {
             if (this.props.theme.printResolutions.length > 1) {
                 resolutionChooser = (
-                    <select name={"DPI"} onChange={this.changeResolution} role="input" value={this.state.dpi || ""}>
-                        {this.props.theme.printResolutions.map(res => (<option key={res} value={res}>{res}</option>))}
-                    </select>);
+                    <select name={"DPI"} onChange={(ev) => this.changeResolution(ev.target.value)} value={this.state.dpi || ""}>
+                        {this.props.theme.printResolutions.map(res => (<option key={res} value={res}>{res} dpi</option>))}
+                    </select>
+                );
             } else {
-                resolutionInput = (<input name="DPI" readOnly role="input" type={formvisibility} value={this.props.theme.printResolutions[0]} />);
+                resolutionInput = (<input name="DPI" readOnly type="hidden" value={this.props.theme.printResolutions[0]} />);
             }
         } else {
-            resolutionChooser = (<input max="1200" min="50" name="DPI" onChange={this.changeResolution} role="input" type="number" value={this.state.dpi || ""} />);
+            resolutionChooser = (<NumberInput max={1200} min={50} mobile name="DPI" onChange={this.changeResolution} suffix=" dpi" value={this.state.dpi || ""} />);
         }
 
-        let gridIntervalX = null;
-        let gridIntervalY = null;
-        const printGrid = this.props.theme.printGrid;
-        if (printGrid && printGrid.length > 0 && this.state.scale && this.state.grid) {
-            let cur = 0;
-            for (; cur < printGrid.length - 1 && this.state.scale < printGrid[cur].s; ++cur);
-            gridIntervalX = (<input name={mapName + ":GRID_INTERVAL_X"} readOnly type={formvisibility} value={printGrid[cur].x} />);
-            gridIntervalY = (<input name={mapName + ":GRID_INTERVAL_Y"} readOnly type={formvisibility} value={printGrid[cur].y} />);
-        }
-        const printLegend = this.state.layout.legendLayout;
-
-        const labels = this.state.layout && this.state.layout.labels ? this.state.layout.labels : [];
-
-        const highlightParams = VectorLayerUtils.createPrintHighlighParams(this.props.layers, mapCrs, this.state.scale, printDpi, this.props.scaleFactor);
-
-        const dimensionValues = this.props.layers.reduce((res, layer) => {
-            if (layer.role === LayerRole.THEME) {
-                Object.entries(layer.dimensionValues || {}).forEach(([key, value]) => {
-                    if (value !== undefined) {
-                        res[key] = value;
-                    }
-                });
+        let scaleChooser = null;
+        if (this.props.theme.printScales?.length > 0) {
+            if (this.props.restrictToPrintScales) {
+                scaleChooser = (
+                    <InputContainer>
+                        <span role="prefix">1&nbsp;:&nbsp;</span>
+                        <select name={mapName + ":scale"} onChange={ev => this.changeScale(ev.target.value)} role="input" value={this.state.scale}>
+                            {this.props.theme.printScales.map(scale => (<option key={scale} value={scale}>{scale}</option>))}
+                        </select>
+                    </InputContainer>
+                );
+            } else {
+                scaleChooser = (
+                    <InputContainer>
+                        <span role="prefix">1&nbsp;:&nbsp;</span>
+                        <EditableSelect
+                            name={mapName + ":scale"} onChange={this.changeScale}
+                            options={this.props.theme.printScales} role="input" value={this.state.scale || ""}
+                        />
+                    </InputContainer>
+                );
             }
-            return res;
-        }, {});
-
-        const extraOptions = Object.fromEntries((this.props.theme.extraPrintParameters || "").split("&").map(entry => entry.split("=")));
-        const layouts = this.props.theme.print.filter(l => l.map).sort((a, b) => {
-            return a.name.localeCompare(b.name, undefined, {numeric: true});
-        });
+        } else {
+            scaleChooser = (
+                <NumberInput min={1} mobile name={mapName + ":scale"} onChange={this.changeScale} prefix="1 : " value={this.state.scale || null}/>
+            );
+        }
 
         const formatMap = {
             "application/pdf": "PDF",
@@ -248,7 +262,7 @@ class Print extends React.Component {
             "image/png": "PNG",
             "image/svg": "SVG"
         };
-        const selectedFormat = this.state.selectedFormat;
+        const allowGeoPdfExport = this.state.selectedFormat === "application/pdf" && this.props.allowGeoPdfExport;
 
         return (
             <div className="print-body">
@@ -261,27 +275,31 @@ class Print extends React.Component {
                             <td>{LocaleUtils.tr("print.layout")}</td>
                             <td>
                                 <select onChange={this.changeLayout} value={this.state.layout.name}>
-                                    {layouts.filter(l => l.map).map(item => {
+                                    {this.state.layouts.map(item => {
+                                        let name = this.translateLayoutName(themeLayer, item);
+                                        if (this.props.omitLayoutPathsFromTitle) {
+                                            name = name.replace(/.*\//, '');
+                                        }
                                         return (
-                                            <option key={item.name} value={item.name}>{item.name.split('/').pop()}</option>
+                                            <option key={item.name} title={name} value={item.name}>{name}</option>
                                         );
                                     })}
                                 </select>
                             </td>
                         </tr>
-                        {this.state.availableFormats.length > 1 ? (
+                        {this.props.formats.length > 1 ? (
                             <tr>
-                                <td>{LocaleUtils.tr("print.format")}</td>
+                                <td>{LocaleUtils.tr("common.format")}</td>
                                 <td>
-                                    <select name="FORMAT" onChange={this.formatChanged} value={this.state.selectedFormat}>
-                                        {this.state.availableFormats.map(format => {
+                                    <select disabled={this.state.printSeriesEnabled} name="FORMAT" onChange={this.formatChanged} value={this.state.selectedFormat}>
+                                        {this.props.formats.map(format => {
                                             return (<option key={format} value={format}>{formatMap[format] || format}</option>);
                                         })}
                                     </select>
                                 </td>
                             </tr>
                         ) : null}
-                        {this.state.layout.atlasCoverageLayer ? (
+                        {this.state.layout.atlasCoverageLayer && !this.state.printSeriesEnabled ? (
                             <tr>
                                 <td>{LocaleUtils.tr("print.atlasfeature")}</td>
                                 <td>
@@ -305,33 +323,32 @@ class Print extends React.Component {
                             <tr>
                                 <td>{LocaleUtils.tr("print.scale")}</td>
                                 <td>
-                                    <InputContainer>
-                                        <span role="prefix">1&nbsp;:&nbsp;</span>
-                                        {scaleChooser}
-                                    </InputContainer>
+                                    {scaleChooser}
                                 </td>
                             </tr>
                         ) : null}
                         {resolutionChooser ? (
                             <tr>
-                                <td>{LocaleUtils.tr("print.resolution")}</td>
+                                <td>{LocaleUtils.tr("common.resolution")}</td>
+                                <td>
+                                    {resolutionChooser}
+                                </td>
+                            </tr>
+                        ) : null}
+                        {this.props.displayRotation ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("print.rotation")}</td>
                                 <td>
                                     <InputContainer>
-                                        {resolutionChooser}
-                                        <span role="suffix">&nbsp;dpi</span>
+                                        <NumberInput decimals={1} mobile name={mapName + ":rotation"} onChange={this.changeRotation} role="input" value={this.state.rotation} />
+                                        <span role="suffix" style={{transform: "rotate(-" + this.state.rotation + "deg)"}}>
+                                            <Icon icon="arrow-up" onClick={() => this.setState({rotation: 0})} title={LocaleUtils.tr("map.resetrotation")} />
+                                        </span>
                                     </InputContainer>
                                 </td>
                             </tr>
                         ) : null}
-                        {this.props.displayRotation === true ? (
-                            <tr>
-                                <td>{LocaleUtils.tr("print.rotation")}</td>
-                                <td>
-                                    <input name={mapName + ":rotation"} onChange={this.changeRotation} type="number" value={rotation}/>
-                                </td>
-                            </tr>
-                        ) : null}
-                        {printGrid ? (
+                        {!isEmpty(this.props.theme.printGrid) ? (
                             <tr>
                                 <td>{LocaleUtils.tr("print.grid")}</td>
                                 <td>
@@ -347,7 +364,38 @@ class Print extends React.Component {
                                 </td>
                             </tr>
                         ) : null}
-                        {(labels || []).map(label => {
+                        {this.props.displayPrintSeries ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("print.series")}</td>
+                                <td>
+                                    <ToggleSwitch active={this.state.printSeriesEnabled} onChange={(newstate) => this.setState({printSeriesEnabled: newstate, atlasFeatures: []})} />
+                                </td>
+                            </tr>
+                        ) : null}
+                        {this.state.printSeriesEnabled ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("print.overlap")}</td>
+                                <td>
+                                    <InputContainer>
+                                        <input max="20" min="0" onChange={this.changeSeriesOverlap} role="input" type="range" value={this.state.printSeriesOverlap} />
+                                        <span role="suffix">{this.state.printSeriesOverlap}&nbsp;%</span>
+                                    </InputContainer>
+                                </td>
+                            </tr>
+                        ) : null}
+                        {!this.props.inlinePrintOutput && this.state.printSeriesEnabled ? (
+                            <tr>
+                                <td>{LocaleUtils.tr("common.download")}</td>
+                                <td>
+                                    <select onChange={this.changeDownloadMode} role="input" value={this.state.downloadMode || ""}>
+                                        <option key="onepdf" value="onepdf">{LocaleUtils.tr("print.download_as_onepdf")}</option>
+                                        <option key="onezip" value="onezip">{LocaleUtils.tr("print.download_as_onezip")}</option>
+                                        <option key="single" value="single">{LocaleUtils.tr("print.download_as_single")}</option>
+                                    </select>
+                                </td>
+                            </tr>
+                        ) : null}
+                        {(this.state.layout?.labels ?? []).map(label => {
                             // Omit labels which start with __
                             if (label.startsWith("__")) {
                                 return null;
@@ -359,7 +407,7 @@ class Print extends React.Component {
                             };
                             return this.renderPrintLabelField(label, opts);
                         })}
-                        {selectedFormat === "application/pdf" && this.props.allowGeoPdfExport ? (
+                        {allowGeoPdfExport ? (
                             <tr>
                                 <td>GeoPDF</td>
                                 <td>
@@ -370,38 +418,20 @@ class Print extends React.Component {
                     </tbody></table>
                     <div>
                         <input name="csrf_token" type="hidden" value={MiscUtils.getCsrfToken()} />
-                        <input name={mapName + ":extent"} readOnly type={formvisibility} value={extent || ""} />
-                        <input name="SERVICE" readOnly type={formvisibility} value="WMS" />
-                        <input name="VERSION" readOnly type={formvisibility} value={version} />
-                        <input name="REQUEST" readOnly type={formvisibility} value="GetPrint" />
-                        <input name="FORMAT" readOnly type={formvisibility} value={selectedFormat} />
-                        <input name="TRANSPARENT" readOnly type={formvisibility} value="true" />
-                        <input name="SRS" readOnly type={formvisibility} value={mapCrs} />
-                        {Object.entries(printParams).map(([key, value]) => (<input key={key} name={key} type={formvisibility} value={value} />))}
-                        <input name="CONTENT_DISPOSITION" readOnly type={formvisibility} value={this.props.inlinePrintOutput ? "inline" : "attachment"} />
-                        <input name={mapName + ":LAYERS"} readOnly type={formvisibility} value={printParams.LAYERS} />
-                        <input name={mapName + ":STYLES"} readOnly type={formvisibility} value={printParams.STYLES} />
-                        <input name={mapName + ":FILTER"} readOnly type={formvisibility} value={printParams.FILTER} />
-                        <input name={mapName + ":HIGHLIGHT_GEOM"} readOnly type={formvisibility} value={highlightParams.geoms.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_SYMBOL"} readOnly type={formvisibility} value={highlightParams.styles.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABELSTRING"} readOnly type={formvisibility} value={highlightParams.labels.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABELCOLOR"} readOnly type={formvisibility} value={highlightParams.labelFillColors.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABELBUFFERCOLOR"} readOnly type={formvisibility} value={highlightParams.labelOultineColors.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABELBUFFERSIZE"} readOnly type={formvisibility} value={highlightParams.labelOutlineSizes.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABELSIZE"} readOnly type={formvisibility} value={highlightParams.labelSizes.join(";")} />
-                        <input name={mapName + ":HIGHLIGHT_LABEL_DISTANCE"} readOnly type={formvisibility} value={highlightParams.labelDist.join(";")} />
-                        {selectedFormat === "application/pdf" && this.props.allowGeoPdfExport  ? (<input name="FORMAT_OPTIONS" readOnly type={formvisibility} value={this.state.geoPdf ? "WRITE_GEO_PDF:true" : "WRITE_GEO_PDF:false"} />) : null}
-                        {gridIntervalX}
-                        {gridIntervalY}
+                        <input name={mapName + ":extent"} readOnly type="hidden" value={formattedExtent} />
+                        <input name="SERVICE" readOnly type="hidden" value="WMS" />
+                        <input name="VERSION" readOnly type="hidden" value={this.props.theme.version} />
+                        <input name="REQUEST" readOnly type="hidden" value="GetPrint" />
+                        <input name="FORMAT" readOnly type="hidden" value={this.state.selectedFormat} />
+                        <input name="TRANSPARENT" readOnly type="hidden" value="true" />
+                        <input name="SRS" readOnly type="hidden" value={this.props.map.projection} />
+                        <input name="CONTENT_DISPOSITION" readOnly type="hidden" value={this.props.inlinePrintOutput ? "inline" : "attachment"} />
+                        {allowGeoPdfExport ? (<input name="FORMAT_OPTIONS" readOnly type="hidden" value={this.state.geoPdf ? "WRITE_GEO_PDF:true" : "WRITE_GEO_PDF:false"} />) : null}
                         {resolutionInput}
-                        {Object.entries(dimensionValues).map(([key, value]) => (
-                            <input key={key} name={key} readOnly type="hidden" value={value} />
-                        ))}
-                        {Object.entries(extraOptions).map(([key, value]) => (<input key={key} name={key} readOnly type="hidden" value={value} />))}
                     </div>
                     <div className="button-bar">
-                        <button className="button" disabled={!printParams.LAYERS || this.state.printing} type="submit">
-                            {this.state.printing ? (<span className="print-wait"><Spinner /> {LocaleUtils.tr("print.wait")}</span>) : LocaleUtils.tr("print.submit")}
+                        <button className="button" disabled={this.state.printing} type="submit">
+                            {this.state.printing ? (<span className="print-wait"><Spinner /> {LocaleUtils.tr("common.wait")}</span>) : LocaleUtils.tr("print.submit")}
                         </button>
                     </div>
                 </form>
@@ -437,7 +467,7 @@ class Print extends React.Component {
                 if (opts.rows || opts.cols) {
                     style.resize = 'none';
                 }
-                if (opts.rows) {
+                if (opts.cols) {
                     style.width = 'initial';
                 }
                 return (
@@ -467,56 +497,109 @@ class Print extends React.Component {
             }
         }).join(" | ");
     };
-    renderPrintFrame = () => {
-        let printFrame = null;
+    renderPrintSelection = () => {
+        let printSelection = null;
         if (this.state.layout && isEmpty(this.state.atlasFeatures)) {
             const frame = {
-                width: this.state.scale * this.state.layout.map.width / 1000,
-                height: this.state.scale * this.state.layout.map.height / 1000
+                width: this.state.layout.map.width,
+                height: this.state.layout.map.height
             };
-            printFrame = (<PrintFrame fixedFrame={frame} key="PrintFrame" map={this.props.map} modal={!isEmpty(this.state.atlasFeatures)} />);
+            printSelection = (<PrintSelection
+                allowRotation={this.props.displayRotation && (!this.state.printSeriesEnabled || this.props.movePrintSeries)}
+                allowScaling={!this.state.printSeriesEnabled || this.props.movePrintSeries}
+                allowTranslation={!this.state.printSeriesEnabled || this.props.movePrintSeries}
+                center={this.state.center || this.props.map.center}
+                fixedFrame={frame}
+                geometryChanged={this.geometryChanged}
+                key="PrintSelection"
+                printSeriesChanged={this.printSeriesChanged}
+                printSeriesEnabled={this.props.displayPrintSeries && this.state.printSeriesEnabled}
+                printSeriesOverlap={this.state.printSeriesOverlap / 100}
+                printSeriesSelected={this.state.printSeriesSelected}
+                rotation={this.state.rotation}
+                scale={this.state.scale}
+            />);
         }
-        return printFrame;
+        return printSelection;
+    };
+    formatExtent = (extent) => {
+        const mapCrs = this.props.map.projection;
+        const version = this.props.theme.version;
+
+        if (CoordinatesUtils.getAxisOrder(mapCrs).substring(0, 2) === 'ne' && version === '1.3.0') {
+            return extent[1] + "," + extent[0] + "," + extent[3] + "," + extent[2];
+        }
+
+        return extent.join(',');
+    };
+    geometryChanged = (center, extents, rotation, scale) => {
+        if (this.props.restrictToPrintScales && this.props.theme.printScales?.length > 0) {
+            scale = this.props.theme.printScales.reduce((prev, curr) => {
+                return Math.abs(curr - scale) < Math.abs(prev - scale) ? curr : prev;
+            });
+        }
+
+        this.setState({
+            center: center,
+            extents: extents,
+            rotation: rotation,
+            scale: scale
+        });
+    };
+    printSeriesChanged = (selected) => {
+        this.setState({
+            printSeriesSelected: selected
+        });
     };
     renderPrintOutputWindow = () => {
+        const extraControls = [{
+            icon: 'save',
+            title: LocaleUtils.tr('common.save'),
+            callback: this.savePrintOutput
+        }];
         return (
-            <ResizeableWindow icon="print" initialHeight={0.75 * window.innerHeight} initialWidth={0.5 * window.innerWidth}
-                key="PrintOutputWindow" onClose={() => this.setState({printOutputVisible: false, outputLoaded: false})}
-                title={LocaleUtils.trmsg("print.output")} visible={this.state.printOutputVisible}
+            <ResizeableWindow extraControls={extraControls} icon="print" initialHeight={0.75 * window.innerHeight}
+                initialWidth={0.5 * window.innerWidth} key="PrintOutputWindow"
+                onClose={() => this.setState({printOutputVisible: false, outputLoaded: false, pdfData: null, pdfDataUrl: null})}
+                title={LocaleUtils.tr("print.output")} visible={this.state.printOutputVisible}
             >
-                <div className="print-output-window-body" role="body">
+                <div className="print-output-window-body">
                     {!this.state.outputLoaded ? (
                         <span className="print-output-window-wait">
-                            <Spinner /> {LocaleUtils.tr("print.wait")}
+                            <Spinner /> {LocaleUtils.tr("common.wait")}
                         </span>
                     ) : null}
-                    <iframe name="print-output-window" onLoad={() => this.setState({outputLoaded: true})} src={this.state.pdfData}/>
+                    <iframe name="print-output-window" src={this.state.pdfDataUrl}/>
                 </div>
             </ResizeableWindow>
         );
     };
+    savePrintOutput = () => {
+        FileSaver.saveAs(this.state.pdfData.content, this.state.pdfData.fileName);
+    };
     render() {
-        const minMaxTooltip = this.state.minimized ? LocaleUtils.tr("print.maximize") : LocaleUtils.tr("print.minimize");
+        const minMaxTooltip = this.state.minimized ? LocaleUtils.tr("window.maximize") : LocaleUtils.tr("window.minimize");
         const extraTitlebarContent = (<Icon className="print-minimize-maximize" icon={this.state.minimized ? 'chevron-down' : 'chevron-up'} onClick={() => this.setState((state) => ({minimized: !state.minimized}))} title={minMaxTooltip}/>);
+        const themeLayer = this.props.layers.find(layer => layer.role === LayerRole.THEME);
         return [
             (
                 <SideBar extraTitlebarContent={extraTitlebarContent} icon={"print"} id="Print" key="Print"
                     onHide={this.onHide} onShow={this.onShow} side={this.props.side}
-                    title="appmenu.items.Print" width="20em">
+                    title={LocaleUtils.tr("appmenu.items.Print")} width="20em">
                     {() => ({
-                        body: this.state.minimized ? null : this.renderBody(),
+                        body: this.state.minimized ? null : this.renderBody(themeLayer),
                         extra: [
-                            this.renderPrintFrame()
+                            this.renderPrintSelection()
                         ]
                     })}
                 </SideBar>
             ),
             this.renderPrintOutputWindow(),
-            this.props.active && this.state.layout && this.state.layout.atlasCoverageLayer ? (
+            this.props.active && this.state.layout && this.state.layout.atlasCoverageLayer && !this.state.printSeriesEnabled ? (
                 <PickFeature
                     featurePicked={this.selectAtlasFeature}
                     key="FeaturePicker"
-                    layer={this.state.layout.atlasCoverageLayer}
+                    layerFilter={{url: themeLayer?.url, name: this.state.layout.atlasCoverageLayer}}
                 />
             ) : null
         ];
@@ -546,81 +629,287 @@ class Print extends React.Component {
     };
     changeLayout = (ev) => {
         const layout = this.props.theme.print.find(item => item.name === ev.target.value);
-        this.setState({layout: layout, atlasFeature: null});
-        this.fixedMapCenter = null;
+        this.setState({layout: layout, atlasFeatures: []});
     };
-    changeScale = (ev) => {
-        this.setState({scale: ev.target.value});
+    changeScale = (value) => {
+        this.setState({scale: Math.max(1, parseInt(value, 10) || 0)});
     };
-    changeResolution = (ev) => {
-        this.setState({dpi: ev.target.value});
+    changeResolution = (value) => {
+        this.setState({dpi: value || 300});
     };
-    changeRotation = (ev) => {
-        if (!ev.target.value) {
-            this.setState({rotationNull: true});
-        } else {
-            this.setState({rotationNull: false});
-            let angle = parseFloat(ev.target.value) || 0;
-            while (angle < 0) {
-                angle += 360;
-            }
-            while (angle >= 360) {
-                angle -= 360;
-            }
-            this.props.changeRotation(angle / 180 * Math.PI);
-        }
+    changeRotation = (value) => {
+        const angle = value || 0;
+        this.setState({rotation: (angle % 360 + 360) % 360});
+    };
+    changeSeriesOverlap = (ev) => {
+        this.setState({printSeriesOverlap: parseInt(ev.target.value, 10) || 0});
+    };
+    changeDownloadMode = (ev) => {
+        this.setState({downloadMode: ev.target.value});
     };
     formatChanged = (ev) => {
         this.setState({selectedFormat: ev.target.value});
     };
-    computeCurrentExtent = () => {
-        if (!this.props.map || !this.state.layout || !this.state.scale) {
-            return [0, 0, 0, 0];
+    presetLayersAndStyles = (presetName) => {
+        const preset = (this.props.theme.visibilityPresets ?? {})[presetName];
+        if (!preset) {
+            return null;
         }
-        const center = this.props.map.center;
-        const widthm = this.state.scale * this.state.layout.map.width / 1000;
-        const heightm = this.state.scale * this.state.layout.map.height / 1000;
-        const {width, height} = MapUtils.transformExtent(this.props.map.projection, center, widthm, heightm);
-        const x1 = center[0] - 0.5 * width;
-        const x2 = center[0] + 0.5 * width;
-        const y1 = center[1] - 0.5 * height;
-        const y2 = center[1] + 0.5 * height;
-        return [x1, y1, x2, y2];
+        // Desktop resolves a theme through mapThemeVisibleLayers, which orders the
+        // theme's layers by the project layer order rather than by the order they
+        // were captured in. Entries without a style are checked group nodes, which
+        // are not requestable layers.
+        const themeLayer = this.props.layers.find(layer => layer.role === LayerRole.THEME);
+        const layerOrder = LayerUtils.getSublayerNames(themeLayer ?? {});
+        const entries = Object.entries(preset)
+            .filter(([, options]) => options.checked && options.style !== undefined)
+            .map(([layerPath, options]) => [layerPath.split("/").slice(-1)[0], options.style])
+            .sort((a, b) => layerOrder.indexOf(a[0]) - layerOrder.indexOf(b[0]))
+            .reverse();
+        return {
+            layers: entries.map(entry => entry[0]).join(","),
+            styles: entries.map(entry => entry[1]).join(",")
+        };
     };
     print = (ev) => {
-        if (this.props.inlinePrintOutput) {
-            this.setState({printOutputVisible: true, outputLoaded: false});
-        }
         ev.preventDefault();
-        this.setState({printing: true});
+        this.setState({ printing: true });
+        if (this.props.inlinePrintOutput) {
+            this.setState({ printOutputVisible: true, outputLoaded: false, pdfDataUrl: null, pdfData: null });
+        }
+
         const formData = formDataEntries(new FormData(this.printForm));
+        const mapCrs = this.props.map.projection;
+        const mapName = this.state.layout.map.name;
+
+        // Add base print params
+        const printParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, this.state.scale, mapCrs, this.props.printExternalLayers);
+        Object.entries(printParams).forEach(([key, value]) => {
+            formData[key] = value;
+        });
+        formData[mapName + ":LAYERS"] = printParams.LAYERS;
+        formData[mapName + ":STYLES"] = printParams.STYLES;
+        formData[mapName + ":FILTER"] = printParams.FILTER;
+        formData[mapName + ":FILTER_GEOM"] = printParams.FILTER_GEOM;
+
+        const mainPreset = this.presetLayersAndStyles(this.state.layout.map.followPresetName);
+        if (mainPreset) {
+            formData.LAYERS = mainPreset.layers;
+            formData.STYLES = mainPreset.styles;
+            formData[mapName + ":LAYERS"] = mainPreset.layers;
+            formData[mapName + ":STYLES"] = mainPreset.styles;
+            // The theme's own styles carry the opacity, as they do on the desktop.
+            // The opacities collected from the client layer tree describe a different
+            // layer list and are applied positionally by the server, so drop them.
+            delete formData.OPACITIES;
+            delete formData.COLORS;
+        }
+
+        // Frozen layout maps: the server drops any layout map the request carries no
+        // extent for, so send each one the extent stored in the layout
+        (this.state.layout.fixedMaps || []).forEach(fixedMap => {
+            let extent = fixedMap.extent;
+            // A map item with its own CRS keeps that CRS on the server, which assigns
+            // the extent to it verbatim, so the saved extent is sent unchanged
+            if (!fixedMap.ownCrs && fixedMap.crs && fixedMap.crs !== mapCrs) {
+                extent = CoordinatesUtils.reprojectBboxDensified(extent, fixedMap.crs, mapCrs);
+                if (!extent) {
+                    /* eslint-disable-next-line */
+                    console.warn("Print: cannot reproject the extent of " + fixedMap.name + " from " + fixedMap.crs + " to " + mapCrs + ", the map will be omitted from the printed layout");
+                    return;
+                }
+                // The server resizes the layout item to the aspect of the extent it
+                // receives, so restore the aspect of the authored on-page rectangle
+                // by growing the deficient axis about the centre
+                const targetAspect = fixedMap.height / fixedMap.width;
+                const width = extent[2] - extent[0];
+                const height = extent[3] - extent[1];
+                if (height / width > targetAspect) {
+                    const delta = (height / targetAspect - width) / 2;
+                    extent = [extent[0] - delta, extent[1], extent[2] + delta, extent[3]];
+                } else {
+                    const delta = (width * targetAspect - height) / 2;
+                    extent = [extent[0], extent[1] - delta, extent[2], extent[3] + delta];
+                }
+            }
+            formData[fixedMap.name + ":EXTENT"] = this.formatExtent(extent);
+            const preset = this.presetLayersAndStyles(fixedMap.followPresetName);
+            if (preset) {
+                // Frozen on a map theme rather than on a locked layer set: without explicit
+                // layers the server would render this map with the interactive map's layers
+                formData[fixedMap.name + ":LAYERS"] = preset.layers;
+                formData[fixedMap.name + ":STYLES"] = preset.styles;
+            }
+            // The server resets a layout map's grid interval unless the request resends it
+            if (fixedMap.gridIntervalX && fixedMap.gridIntervalY) {
+                formData[fixedMap.name + ":GRID_INTERVAL_X"] = fixedMap.gridIntervalX;
+                formData[fixedMap.name + ":GRID_INTERVAL_Y"] = fixedMap.gridIntervalY;
+            }
+        });
+
+        // Add highlight params
+        const printDpi = parseInt(this.state.dpi, 10) || 0;
+
+        if (this.props.printMapHighlights) {
+            const highlightParams = VectorLayerUtils.createPrintHighlighParams(this.props.layers, mapCrs, this.state.scale, printDpi, this.props.scaleFactor);
+            formData[mapName + ":HIGHLIGHT_GEOM"] = highlightParams.geoms.join(";");
+            formData[mapName + ":HIGHLIGHT_SYMBOL"] = highlightParams.styles.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELSTRING"] = highlightParams.labels.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELCOLOR"] = highlightParams.labelFillColors.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELBUFFERCOLOR"] = highlightParams.labelOutlineColors.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELBUFFERSIZE"] = highlightParams.labelOutlineSizes.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELSIZE"] = highlightParams.labelSizes.join(";");
+            formData[mapName + ":HIGHLIGHT_LABEL_DISTANCE"] = highlightParams.labelDist.join(";");
+            formData[mapName + ":HIGHLIGHT_LABEL_ROTATION"] = highlightParams.labelRotations.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELFRAMEBACKGROUNDCOLOR"] = highlightParams.labelFrameColors.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELFRAMEOUTLINECOLOR"] = highlightParams.labelFrameOutlines.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELFRAMESIZE"] = highlightParams.labelFrameSizes.join(";");
+            formData[mapName + ":HIGHLIGHT_LABELFRAMEOUTLINEWIDTH"] = highlightParams.labelFrameOutlineWidths.join(";");
+        }
+
+        // Add grid params
+        const printGrid = this.props.theme.printGrid;
+        if (!isEmpty(printGrid)) {
+            if (this.state.grid) {
+                let cur = 0;
+                while (cur < printGrid.length - 1 && this.state.scale < printGrid[cur].s) {
+                    cur += 1;
+                }
+                formData[mapName + ":GRID_INTERVAL_X"] = printGrid[cur].x;
+                formData[mapName + ":GRID_INTERVAL_Y"] = printGrid[cur].y;
+            } else {
+                formData[mapName + ":GRID_INTERVAL_X"] = 0;
+                formData[mapName + ":GRID_INTERVAL_Y"] = 0;
+            }
+        }
+
+        // Add dimension values
+        this.props.layers.forEach(layer => {
+            if (layer.role === LayerRole.THEME) {
+                Object.entries(layer.dimensionValues || {}).forEach(([key, value]) => {
+                    if (value !== undefined) {
+                        formData[key] = value;
+                    }
+                });
+            }
+        });
+
+        // Add extra print parameters
+        const extraOptions = Object.fromEntries((this.props.theme.extraPrintParameters || "").split("&").filter(Boolean).map(entry => entry.split("=")));
+        Object.entries(extraOptions).forEach(([key, value]) => {
+            formData[key] = value;
+        });
+
+        let pages = [formData];
+
+        if (this.state.printSeriesEnabled) {
+            pages = this.state.extents.map((extent, index) => {
+                const fd = structuredClone(formData);
+                fd.name = (index + 1).toString().padStart(2, '0');
+                fd[this.state.layout.map.name + ':extent'] = this.formatExtent(extent);
+                return fd;
+            });
+        }
+
+        const timestamp = dayjs(new Date()).format("YYYYMMDD_HHmmss");
+        const fileName = this.props.fileNameTemplate
+            .replace("{layout}", this.state.layout.name)
+            .replace("{username}", ConfigUtils.getConfigProp("username", null, ""))
+            .replace("{tenant}", ConfigUtils.getConfigProp("tenant", null, ""))
+            .replace("{theme}", this.props.theme.id)
+            .replace("{themeTitle}", this.props.theme.title || "")
+            .replace("{timestamp}", timestamp);
+
+        // batch print all pages
+        this.batchPrint(pages, fileName)
+            .catch((e) => {
+                this.setState({ outputLoaded: true, printOutputVisible: false });
+                if (e.response) {
+                    /* eslint-disable-next-line */
+                    console.warn(new TextDecoder().decode(e.response.data));
+                }
+                /* eslint-disable-next-line */
+                alert('Print failed');
+            }).finally(() => {
+                this.setState({ printing: false });
+            });
+    };
+    async batchPrint(pages, fileName) {
+        // Print pages on server
+        const promises = pages.map((formData) => this.printRequest(formData));
+        // Collect printing results
+        const docs = await Promise.all(promises);
+        // Convert into downloadable files
+        const files = await this.collectFiles(docs, fileName);
+        // Download or display files
+        if (this.props.inlinePrintOutput && files.length === 1) {
+            const file = files.pop();
+            const fileURL = URL.createObjectURL(file.content);
+            this.setState({ pdfData: file, pdfDataUrl: fileURL, outputLoaded: true });
+        } else {
+            for (const file of files) {
+                FileSaver.saveAs(file.content, file.fileName);
+            }
+        }
+    }
+    async printRequest(formData) {
         const data = Object.entries(formData).map((pair) =>
             pair.map(entry => encodeURIComponent(entry).replace(/%20/g, '+')).join("=")
-        ).join("&");
+        ).join('&');
         const config = {
             headers: {'Content-Type': 'application/x-www-form-urlencoded' },
-            responseType: "arraybuffer"
+            responseType: 'arraybuffer'
         };
-        axios.post(this.props.theme.printUrl, data, config).then(response => {
-            this.setState({printing: false});
-            const contentType = response.headers["content-type"];
-            const file = new Blob([response.data], { type: contentType });
-            if (this.props.inlinePrintOutput) {
-                const fileURL = URL.createObjectURL(file);
-                this.setState({ pdfData: fileURL, outputLoaded: true });
-            } else {
-                const ext = this.state.selectedFormat.split(";")[0].split("/").pop();
-                FileSaver.saveAs(file, this.props.theme.name + '.' + ext);
-            }
-        }).catch(e => {
-            this.setState({printing: false});
-            if (e.response) {
-                /* eslint-disable-next-line */
-                console.log(new TextDecoder().decode(e.response.data));
-            }
-            /* eslint-disable-next-line */
-            alert('Print failed');
+        const response = await axios.post(this.props.theme.printUrl, data, config);
+        const contentType = response.headers['content-type'];
+        return {
+            name: formData.name,
+            data: response.data,
+            contentType: contentType
+        };
+    }
+    async collectFiles(docs, fileName) {
+        if (docs.length > 1 && this.state.downloadMode === 'onepdf') {
+            const data = await this.collectOnePdf(docs);
+            const content = new Blob([data], { type: 'application/pdf' });
+            return [{ content, fileName: fileName + '.pdf' }];
+        }
+        if (docs.length > 1 && this.state.downloadMode === 'onezip') {
+            const data = await this.collectOneZip(docs, fileName);
+            const content = new Blob([data], { type: 'application/zip' });
+            return [{ content, fileName: fileName + '.zip' }];
+        }
+        return docs.map((doc) => {
+            const content = new Blob([doc.data], { type: doc.contentType });
+            const ext = this.state.selectedFormat.split(";")[0].split("/").pop();
+            const appendix = doc.name ? '_' + doc.name : '';
+            return { content, fileName: fileName + appendix + '.' + ext };
         });
+    }
+    async collectOnePdf(docs) {
+        const {PDFDocument} = await import('pdf-lib');
+        const mergedDoc = await PDFDocument.create();
+        for (const doc of docs) {
+            const pdfBytes = await PDFDocument.load(doc.data);
+            const copiedPages = await mergedDoc.copyPages(pdfBytes, pdfBytes.getPageIndices());
+            for (const page of copiedPages) {
+                mergedDoc.addPage(page);
+            }
+        }
+        return await mergedDoc.save();
+    }
+    async collectOneZip(docs, fileName) {
+        const mergedDoc = new JSZip();
+        for (const doc of docs) {
+            const file = new Blob([doc.data], { type: doc.contentType });
+            const ext = this.state.selectedFormat.split(";")[0].split("/").pop();
+            const appendix = doc.name ? '_' + doc.name : '';
+            mergedDoc.file(fileName + appendix + '.' + ext, file);
+        }
+        return await mergedDoc.generateAsync({ type: 'arraybuffer' });
+    }
+    translateLayoutName = (themeLayer, item) => {
+        return themeLayer.translations?.layouts?.[item.title] ?? themeLayer.translations?.layouts?.[item.name] ?? item.title ?? item.name;
     };
 }
 
@@ -634,6 +923,5 @@ const selector = (state) => ({
 export default connect(selector, {
     addLayerFeatures: addLayerFeatures,
     clearLayer: clearLayer,
-    changeRotation: changeRotation,
-    panTo: panTo
+    setSnappingConfig: setSnappingConfig
 })(Print);

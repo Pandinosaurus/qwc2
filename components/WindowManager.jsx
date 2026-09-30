@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,11 +7,15 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+
+import {closeWindow, closeAllWindows, NotificationType} from '../actions/windows';
+import LocaleUtils from '../utils/LocaleUtils';
 import Icon from './Icon';
 import ResizeableWindow from './ResizeableWindow';
-import {closeWindow, closeAllWindows, NotificationType} from '../actions/windows';
 
 import './style/WindowManager.css';
 
@@ -52,12 +56,14 @@ class WindowManager extends React.Component {
         if (this.boolVal(data.options.print, true) !== false) {
             extraControls.push({icon: "print", callback: () => this.printIframe(key)});
         }
-        const dockable = this.boolVal(data.options.dockable) !== false;
+        const detachable = this.boolVal(data.options.detachable, true) !== false;
+        const dockable = ["left", "right", "top", "bottom"].includes(data.options.dockable) ? data.options.dockable : this.boolVal(data.options.dockable);
         const docked = this.boolVal(data.options.docked) !== false;
         const splitScreenWhenDocked = this.boolVal(data.options.splitScreenWhenDocked) !== false;
         return (
             <ResizeableWindow
                 baseZIndex={data.options.zIndex || 10}
+                detachable={detachable}
                 dockable={dockable || docked}
                 extraControls={extraControls} icon={data.options.icon || ""}
                 initialHeight={data.options.h || 480}
@@ -65,8 +71,8 @@ class WindowManager extends React.Component {
                 initiallyDocked={docked} key={key}
                 onClose={() => this.closeWindow(key)}
                 splitScreenWhenDocked={splitScreenWhenDocked}
-                title={data.options.title || "windows." + key}>
-                <iframe className="windows-iframe-dialog-body" name={key} role="body" src={data.url} />
+                title={LocaleUtils.tr(data.options.title || "windows." + key)}>
+                <iframe className="windows-iframe-dialog-body" name={key} src={data.url} />
             </ResizeableWindow>
         );
     };
@@ -79,7 +85,19 @@ class WindowManager extends React.Component {
         }
         return (
             <div className={className} key={key}>
-                <div>{data.text}</div>
+                <div>
+                    <div>{data.text}</div>
+                    {!isEmpty(data.actions) ? (
+                        <div className="windows-notification-actions">
+                            {data.actions.map((action, idx) => (
+                                <button className="button" key={"action" + idx} onClick={() => {
+                                    const res = action.onClick();
+                                    if (res) this.closeWindow(key);
+                                }} type="button">{action.name}</button>
+                            ))}
+                        </div>) : null
+                    }
+                </div>
                 <span>
                     <Icon icon="remove" onClick={() => this.closeWindow(key)} size="large"/>
                 </span>
@@ -95,13 +113,13 @@ class WindowManager extends React.Component {
             window.frames[key].print();
         }
     };
-    boolVal = (value, delft = false) => {
+    boolVal = (value, deflt = false) => {
         if (value === undefined || value === null) {
-            return delft;
+            return deflt;
         }
         const textVal = ("" + value).toLowerCase();
         if (textVal === "") {
-            return delft;
+            return deflt;
         }
         return ["0", "false"].includes(textVal) ? false : true;
     };

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,71 +7,60 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import PropTypes from 'prop-types';
+
 import {toggleFullscreen} from '../actions/display';
+import ConfigUtils from '../utils/ConfigUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
+
 import './style/FullscreenSwitcher.css';
 
 class FullscreenSwitcher extends React.Component {
     static propTypes = {
         fullscreen: PropTypes.bool,
-        fullscreenToggled: PropTypes.func,
-        mobile: PropTypes.bool
+        fullscreenToggled: PropTypes.func
     };
     toggleFullscreen = () => {
         this.props.fullscreenToggled(!this.props.fullscreen);
     };
     componentDidMount() {
-        if (document.onfullscreenchange !== undefined) {
-            document.onfullscreenchange = this.checkFullscreenState;
-        } else if (document.onwebkitfullscreenchange !== undefined) {
-            document.onwebkitfullscreenchange = this.checkFullscreenState;
-        } else if (document.onmozfullscreenchange !== undefined) {
-            document.onmozfullscreenchange = this.checkFullscreenState;
-        } else if (document.onmsfullscreenchange !== undefined) {
-            document.onmsfullscreenchange = this.checkFullscreenState;
-        }
-        if (document.onfullscreenerror !== undefined) {
-            document.onfullscreenerror = this.checkFullscreenState;
-        } else if (document.onwebkitfullscreenerror !== undefined) {
-            document.onwebkitfullscreenerror = this.checkFullscreenState;
-        } else if (document.onmozfullscreenerror !== undefined) {
-            document.onmozfullscreenerror = this.checkFullscreenState;
-        } else if (document.onmsfullscreenerror !== undefined) {
-            document.onmsfullscreenerror = this.checkFullscreenState;
-        }
+        document.addEventListener('fullscreenchange', this.checkFullscreenState);
+        document.addEventListener('webkitfullscreenchange', this.checkFullscreenState);
+        document.addEventListener('fullscreenerror', this.checkFullscreenState);
+        document.addEventListener('webkitfullscreenerror', this.checkFullscreenState);
+    }
+    componentWillUnmount() {
+        document.removeEventListener('fullscreenchange', this.checkFullscreenState);
+        document.removeEventListener('webkitfullscreenchange', this.checkFullscreenState);
+        document.removeEventListener('fullscreenerror', this.checkFullscreenState);
+        document.removeEventListener('webkitfullscreenerror', this.checkFullscreenState);
     }
     checkFullscreenState = () => {
-        const isFullScreen = (
-            document.fullscreenElement ||
-            document.webkitFullscreenElement ||
-            document.mozFullScreenElement ||
-            document.msFullscreenElement
-        ) !== undefined;
+        const isFullScreen = (document.fullscreenElement ?? document.webkitFullscreenElement ?? null) !== null;
         if (isFullScreen !== this.props.fullscreen) {
-            this.props.fullscreenToggled(!this.props.fullscreen);
+            this.props.fullscreenToggled(isFullScreen);
         }
     };
     render() {
         // Render nothing on mobile, but keep the component for the onfullscreenchange logic
-        if (this.props.mobile) {
+        if (ConfigUtils.isMobile()) {
             return null;
         }
         const tooltip = this.props.fullscreen ? LocaleUtils.tr("tooltip.fullscreendisable") : LocaleUtils.tr("tooltip.fullscreenenable");
         return (
-            <span id="FullScreenSwitcher" onClick={this.toggleFullscreen} title={tooltip}>
+            <div className="FullScreenSwitcher" onClick={this.toggleFullscreen} onKeyDown={MiscUtils.checkKeyActivate} tabIndex={0} title={tooltip}>
                 <span className={this.props.fullscreen ? "minimize" : "maximize"} />
-            </span>
+            </div>
         );
     }
 }
 
-const selector = (state) => ({
-    mobile: state.browser.mobile,
-    fullscreen: state.display.fullscreen
-});
 
-export default connect(selector, {
+export default connect((state) => ({
+    fullscreen: state.display.fullscreen
+}), {
     fullscreenToggled: toggleFullscreen
 })(FullscreenSwitcher);

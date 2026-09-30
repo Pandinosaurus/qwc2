@@ -1,6 +1,6 @@
 /**
  * Copyright 2015-2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,15 +8,14 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import classnames from 'classnames';
-import LocaleUtils from '../utils/LocaleUtils';
+
+import PropTypes from 'prop-types';
+
 import {changeLocateState} from '../actions/locate';
-import Icon from '../components/Icon';
-import Spinner from '../components/Spinner';
+import MapButton from '../components/MapButton';
+import LocaleUtils from '../utils/LocaleUtils';
 import ThemeUtils from '../utils/ThemeUtils';
-import './style/Buttons.css';
 
 
 /**
@@ -26,7 +25,6 @@ class LocateButton extends React.Component {
     static propTypes = {
         changeLocateState: PropTypes.func,
         locateState: PropTypes.string,
-        mapMargins: PropTypes.object,
         /** The position slot index of the map button, from the bottom (0: bottom slot). */
         position: PropTypes.number,
         theme: PropTypes.object,
@@ -48,15 +46,9 @@ class LocateButton extends React.Component {
         }
     };
     render = () => {
-        if (!ThemeUtils.themFlagsAllowed(this.props.theme, this.props.themeFlagWhitelist, this.props.themeFlagBlacklist)) {
+        if (!ThemeUtils.themeFlagsAllowed(this.props.theme, this.props.themeFlagWhitelist, this.props.themeFlagBlacklist)) {
             return null;
         }
-        const right = this.props.mapMargins.right;
-        const bottom = this.props.mapMargins.bottom;
-        const style = {
-            right: 'calc(1.5em + ' + right + 'px)',
-            bottom: 'calc(' + bottom + 'px + ' + (5 + 4 * this.props.position) + 'em)'
-        };
         const tooltipMsg = {
             DISABLED: LocaleUtils.tr("locate.statustooltip.DISABLED"),
             ENABLED: LocaleUtils.tr("locate.statustooltip.ENABLED"),
@@ -64,31 +56,24 @@ class LocateButton extends React.Component {
             LOCATING: LocaleUtils.tr("locate.statustooltip.LOCATING"),
             PERMISSION_DENIED: LocaleUtils.tr("locate.statustooltip.PERMISSION_DENIED")
         };
-        let contents = null;
-        if (this.props.locateState === "LOCATING") {
-            contents = (<Spinner />);
-        } else {
-            contents = (<Icon icon="screenshot" title={tooltipMsg[this.props.locateState]}/>);
-        }
-        const classes = classnames({
-            "map-button": true,
-            ["locate-button-" + this.props.locateState]: true
-        });
         return (
-            <button className={classes}
-                disabled={this.props.locateState === "PERMISSION_DENIED"} onClick={this.onClick}
-                style={style}
-                title={tooltipMsg[this.props.locateState]}
-            >
-                {contents}
-            </button>
+            <MapButton
+                active={["LOCATING", "ENABLED"].includes(this.props.locateState)}
+                busy={this.props.locateState === "LOCATING"}
+                className={"locate-button-" + this.props.locateState}
+                disabled={this.props.locateState === "PERMISSION_DENIED"}
+                engaged={this.props.locateState === "FOLLOWING"}
+                icon="screenshot"
+                onClick={this.onClick}
+                position={this.props.position}
+                tooltip={tooltipMsg[this.props.locateState]}
+            />
         );
     };
 }
 
 export default connect(state => ({
     locateState: state.locate.state,
-    mapMargins: state.windows.mapMargins,
     theme: state.theme.current
 }), {
     changeLocateState: changeLocateState

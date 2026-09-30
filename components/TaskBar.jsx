@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,10 +7,13 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import PropTypes from 'prop-types';
+
 import {setCurrentTask, setCurrentTaskBlocked} from '../actions/task';
 import MessageBar from './MessageBar';
+
 
 class TaskBar extends React.Component {
     static propTypes = {
@@ -28,42 +31,36 @@ class TaskBar extends React.Component {
         onHide: () => {}
     };
     componentDidUpdate(prevProps) {
-        const newVisible = this.props.currentTask && this.props.currentTask.id === this.props.task;
-        const oldVisible = prevProps.currentTask && prevProps.currentTask.id === this.props.task;
-        if (newVisible && (!oldVisible || this.props.currentTask.mode !== prevProps.currentTask.mode)) {
+        const newVisible = this.props.currentTask?.id === this.props.task;
+        const oldVisible = prevProps.currentTask?.id === this.props.task;
+        if (newVisible && (!oldVisible || this.props.currentTask.mode !== prevProps.currentTask?.mode)) {
             this.props.onShow(this.props.currentTask.mode, this.props.currentTask.data);
         } else if (!newVisible && oldVisible) {
             this.props.onHide();
         }
     }
     closeClicked = () => {
-        if (this.props.currentTask.id === this.props.task) {
-            if (this.props.unblockOnClose) {
-                this.props.setCurrentTaskBlocked(false);
-            }
-            this.props.setCurrentTask(null);
+        if (this.props.unblockOnClose) {
+            this.props.setCurrentTaskBlocked(false);
         }
-    };
-    renderRole = (role) => {
-        return React.Children.toArray(this.props.children).filter((child) => child.props.role === role);
+        this.props.setCurrentTask(null);
     };
     render() {
         if (this.props.currentTask.id !== this.props.task) {
             return null;
         }
         return (
-            <MessageBar className={this.props.task} onHide={this.closeClicked}>
+            <MessageBar onClose={this.closeClicked}>
                 {this.props.children}
             </MessageBar>
         );
     }
 }
 
-const selector = (state) => ({
-    currentTask: state.task
-});
 
-export default connect(selector, {
+export default connect((state) => ({
+    currentTask: state.task
+}), {
     setCurrentTask: setCurrentTask,
     setCurrentTaskBlocked: setCurrentTaskBlocked
 })(TaskBar);

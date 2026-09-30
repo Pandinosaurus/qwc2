@@ -1,17 +1,46 @@
-#LayerTree span.layertree-tree-visibility {
-    margin: 0 0.5em;
-    color: var(--titlebar-bg-color);
+#LayerTree span.layertree-visibility-button {
+    padding: 0.25em 1em 0.25em 0.25em;
+    position: relative;
+    display: inline-flex;
+    align-items: start;
+    justify-content: center;
+    cursor: pointer;
+    margin-right: 0.25em;
 }
 
-#LayerTree span.layertree-tree-visibility:before {
+#LayerTree span.layertree-visibility-button:hover,
+#LayerTree span.layertree-visibility-button-active {
+    color: var(--titlebar-bg-color);
     background-color: var(--titlebar-text-color);
+}
+
+#LayerTree span.layertree-visibility-button > span.icon-chevron-down {
+    position: absolute;
+    bottom: -1px;
+    right: 0;
+    font-size: 80%;
+}
+
+div.layertree-visibility-menu > div {
+    white-space: nowrap;
+    padding: 0.25em 1em 0.25em 0.5em;
+    display: flex;
+    align-items: start;
+}
+
+div.layertree-visibility-menu > div > span.icon {
+    margin-right: 0.5em;
+}
+
+div.layertree-visibility-menu-sep:not(:first-child) {
+    border-top: 1px solid var(--border-color);
 }
 
 #LayerTree span.layertree-print-legend,
 #LayerTree span.layertree-visible-filter,
 #LayerTree span.layertree-delete-legend,
 #LayerTree span.layertree-theme-metadata {
-    margin-left: 0.5em;
+    margin-right: 0.25em;
     padding: 0.25em;
 }
 
@@ -28,22 +57,12 @@
     color: var(--titlebar-bg-color);
 }
 
-/* https://github.com/philipwalton/flexbugs/issues/216 */
-#LayerTree div.layertree-container-wrapper {
-    display: flex;
-    flex-direction: row;
-}
-
 #LayerTree div.layertree-container {
-    flex: 0 0 100%;
-    max-width: 100%;
+    flex: 1 1 auto;
     display: flex;
+    max-width: 100%;
     flex-direction: column;
-    /* topbar: 3.5em */
-    /* bottombar is high 3em at 75% font size, hence at 100% font size it is 0.75 * 3em = 2.25em */
-    /* titlebar: 2.5em */
-    max-height: calc(100vh - 8.25em); /* viewport - topbar - bottombar - sidebar_titlebar*/
-    max-height: calc(var(--vh, 1vh) * 100 - 8.25em); /* viewport - topbar - bottombar - sidebar_titlebar*/
+    min-height: 0;
 }
 
 #LayerTree div.layertree-tree {
@@ -57,7 +76,7 @@
 
 #LayerTree div.layertree-tree .drop-ghost {
     outline: 1px solid var(--color-active);
-    background-color: var(--container-bg-color);
+    background-color: var(--list-bg-color);
     color: var(--text-color);
 }
 
@@ -165,6 +184,7 @@ img.layertree-item-legend-tooltip {
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 0 1 auto;
+    cursor: pointer;
 }
 
 #LayerTree div.layertree-item-noresults {
@@ -214,6 +234,11 @@ img.layertree-item-legend-tooltip {
     color: red;
 }
 
+
+#LayerTree span.layertree-item-metadata {
+    width: 1.75em;
+}
+
 #LayerTree span.layertree-item-menubutton {
     text-align: center;
     width: 1.75em;
@@ -230,6 +255,7 @@ img.layertree-item-legend-tooltip {
 }
 
 #LayerTree div.layertree-item-optionsmenu {
+    touch-action: none;
     margin-left: 1em;
     height: 1.75em;
     display: flex;
@@ -267,6 +293,7 @@ img.layertree-item-legend-tooltip {
 
 #LayerTree div.layertree-item-stylemenu > div > span.icon {
     margin-right: 0.25em;
+    cursor: pointer;
 }
 
 #LayerTree div.layertree-item-stylemenu > div > div {
@@ -285,4 +312,33 @@ img.layertree-item-legend-tooltip {
 
 #LayerTree div.layertree-item-addsep:hover {
     border-top: 2px solid var(--color-active);
+}
+
+div.layertree-legend-print-body {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+div.layertree-legend-print-body > iframe {
+    border: 0;
+    background-color: white;
+    width: 100%;
+    height: 100%;
+    flex: 1 1 auto;
+}
+
+div.layertree-legend-print-body-buttonbar {
+    border-top: 1px solid var(--border-color);
+    flex: 0 0 auto;
+    text-align: center;
+}
+
+div.layertree-legend-print-body-buttonbar > button {
+    margin: 0.5em;
+    padding: 0.5em;
+    background-color: var(--titlebar-bg-color);
+    color: white;
+    font-weight: bold;
+    border: 1px solid var(--border-color);
 }

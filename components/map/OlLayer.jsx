@@ -1,6 +1,6 @@
 /**
  * Copyright 2015 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,13 +8,16 @@
  */
 import React from 'react';
 import {connect} from 'react-redux';
-import PropTypes from 'prop-types';
+
 import ol from 'openlayers';
-import {setLayerLoading} from '../../actions/layers';
-import CoordinatesUtils from '../../utils/CoordinatesUtils';
+import PropTypes from 'prop-types';
+
+import {refreshLayer, setLayerLoading} from '../../actions/layers';
+import {zoomToExtent} from '../../actions/map';
+import LayerUtils from '../../utils/LayerUtils';
+import MapUtils from '../../utils/MapUtils';
 import Signal from '../../utils/Signal';
 import LayerRegistry from './layers/index';
-import MapUtils from '../../utils/MapUtils';
 
 export const OlLayerAdded = new Signal();
 export const OlLayerUpdated = new Signal();
@@ -25,46 +28,51 @@ class OlLayer extends React.Component {
         map: PropTypes.object,
         options: PropTypes.object,
         projection: PropTypes.string,
+        refreshLayer: PropTypes.func,
         setLayerLoading: PropTypes.func,
         swipe: PropTypes.number,
-        zIndex: PropTypes.number
+        zIndex: PropTypes.number,
+        zoomToExtent: PropTypes.func
     };
-    state = {
-        layer: null
-    };
+    constructor(props) {
+        super(props);
+        this.layer = null;
+        this.updateInterval = null;
+    }
     componentDidMount() {
         this.tilestoload = 0;
         this.createLayer(this.makeOptions(this.props.options));
     }
     componentDidUpdate(prevProps) {
-        if (!this.state.layer) {
+        if (!this.layer) {
             return;
         }
         const newOptions = this.makeOptions(this.props.options);
         const oldOptions = this.makeOptions(prevProps.options);
 
         this.updateLayer(newOptions, oldOptions);
-        // WMS layer handles visibility separately
+        // WMS layer handles visibility and opacity internally
         if (newOptions.type !== "wms") {
-            this.state.layer.setVisible(newOptions.visibility);
+            this.layer.setVisible(newOptions.visibility);
+            this.layer.setOpacity(newOptions.opacity / 255.0);
         }
-        this.state.layer.setOpacity(newOptions.opacity / 255.0);
-        this.state.layer.setZIndex(this.props.zIndex);
+        this.layer.setZIndex(this.props.zIndex);
 
         if (this.props.swipe !== prevProps.swipe) {
             this.props.map.render();
         }
     }
     componentWillUnmount() {
-        if (this.state.layer && this.props.map) {
-            this.props.map.removeLayer(this.state.layer);
+        if (this.layer && this.props.map) {
+            this.props.map.removeLayer(this.layer);
         }
+        clearInterval(this.updateInterval);
     }
     render() {
         const layerCreator = LayerRegistry[this.props.options.type];
         if (layerCreator && layerCreator.render) {
             // NOTE: required for Google Maps layer
-            return layerCreator.render(this.props.options, this.props.map, this.state.layer);
+            return layerCreator.render(this.props.options, this.props.map, this.layer);
         }
         return null;
     }
@@ -73,20 +81,22 @@ class OlLayer extends React.Component {
         return {
             ...options,
             projection: projection,
-            opacity: options.opacity !== undefined ? options.opacity : 255,
+            opacity: options.opacity ?? 255,
+            visibility: options.visibility ?? true,
             minResolution: typeof options.minScale === 'number' ? MapUtils.getResolutionsForScales([options.minScale], projection)[0] : undefined,
             maxResolution: typeof options.maxScale === 'number' ? MapUtils.getResolutionsForScales([options.maxScale], projection)[0] : undefined
         };
     };
     createLayer = (options) => {
-        let layer = null;
-        if (options.type === 'group') {
-            layer = new ol.layer.Group({zIndex: this.props.zIndex});
-            layer.setLayers(new ol.Collection(options.items.map(item => {
+        if (options.externallyManaged) {
+            return;
+        } else if (options.type === 'group') {
+            this.layer = new ol.layer.Group({zIndex: this.props.zIndex});
+            this.layer.setLayers(new ol.Collection(options.items.map(item => {
                 const layerCreator = LayerRegistry[item.type];
                 if (layerCreator) {
                     const sublayer = layerCreator.create(this.makeOptions(item), this.props.map);
-                    layer.set('id', options.id + "#" + item.name);
+                    sublayer.set('id', options.id + "#" + item.name);
                     return sublayer;
                 } else {
                     return null;
@@ -95,32 +105,51 @@ class OlLayer extends React.Component {
         } else {
             const layerCreator = LayerRegistry[options.type];
             if (layerCreator) {
-                layer = layerCreator.create(options, this.props.map);
+                this.layer = layerCreator.create(options, this.props.map);
             }
         }
-        if (layer) {
-            layer.set('id', options.id);
-            layer.setVisible(layer.get("empty") !== true && options.visibility);
-            layer.setOpacity(options.opacity / 255.0);
-            layer.setZIndex(this.props.zIndex);
-            this.addLayer(layer, options);
-            this.setState({layer: layer});
+        if (this.layer) {
+            this.layer.set('id', options.id);
+            // WMS layer handles visibility and opacity internally
+            if (options.type !== "wms") {
+                this.layer.setVisible(this.layer.get("empty") !== true && options.visibility);
+                this.layer.setOpacity(options.opacity / 255.0);
+            }
+            this.layer.setZIndex(this.props.zIndex);
+            this.addLayer(this.layer, options);
+            const refreshInterval = LayerUtils.getLayerRefreshInterval(options);
+            if (refreshInterval > 0 && options.visibility) {
+                this.updateInterval = setInterval(() => {
+                    this.props.refreshLayer((layer) => layer.id === options.id);
+                }, refreshInterval);
+            }
         }
     };
     updateLayer = (newOptions, oldOptions) => {
         // optimization to avoid to update the layer if not necessary
-        if (newOptions === oldOptions) {
+        if (newOptions === oldOptions || newOptions.externallyManaged) {
             return;
         }
         const layerCreator = LayerRegistry[this.props.options.type];
         if (layerCreator && layerCreator.update) {
             layerCreator.update(
-                this.state.layer,
+                this.layer,
                 newOptions,
                 oldOptions,
                 this.props.map
             );
-            OlLayerUpdated.notify(this.state.layer);
+            OlLayerUpdated.notify(this.layer);
+        }
+        const oldRefreshInterval = LayerUtils.getLayerRefreshInterval(oldOptions);
+        const newRefreshInterval = LayerUtils.getLayerRefreshInterval(newOptions);
+        if (oldRefreshInterval !== newRefreshInterval || oldOptions.visibility !== newOptions.visibility) {
+            clearInterval(this.updateInterval);
+            this.updateInterval = null;
+            if (newRefreshInterval && newOptions.visibility) {
+                this.updateInterval = setInterval(() => {
+                    this.props.refreshLayer((layer) => layer.id === newOptions.id);
+                }, newRefreshInterval);
+            }
         }
     };
     addLayer = (layer, options) => {
@@ -142,13 +171,7 @@ class OlLayer extends React.Component {
         });
 
         if (options.zoomToExtent && options.bbox && options.bbox.bounds) {
-            const map = this.props.map;
-            const extent = CoordinatesUtils.reprojectBbox(options.bbox.bounds, options.bbox.crs, map.getView().getProjection());
-            try {
-                map.getView().fit(extent, map.getSize());
-            } catch (e) {
-                /* pass */
-            }
+            this.props.zoomToExtent(options.bbox.bounds, options.bbox.crs);
         }
         const sublayers = {};
         if (layer instanceof ol.layer.Group) {
@@ -204,5 +227,7 @@ class OlLayer extends React.Component {
 }
 
 export default connect(() => ({}), {
-    setLayerLoading: setLayerLoading
+    setLayerLoading: setLayerLoading,
+    refreshLayer: refreshLayer,
+    zoomToExtent: zoomToExtent
 })(OlLayer);

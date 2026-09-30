@@ -5,7 +5,7 @@ div.routing-body {
 }
 
 div.routing-buttonbar {
-    flex: 0 0 auto;
+    margin-bottom: -1px;
 }
 
 div.routing-frame {
@@ -15,13 +15,12 @@ div.routing-frame {
     min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow-y: auto;
 }
 
 div.routing-buttons {
-    display: flex;
-    align-items: center;
     position: relative;
-    flex: 0 0 auto;
+    margin-bottom: 0.25em;
 }
 
 div.routing-buttons > div.ButtonBar {
@@ -51,6 +50,10 @@ div.routing-tab-widget {
 
 div.routing-input {
     flex: 0 0 auto;
+}
+
+table.routing-settings-menu-entries {
+    width: 100%;
 }
 
 table.routing-settings-menu-entries td {
@@ -90,19 +93,12 @@ div.routing-points-commands > div.VectorLayerPicker {
 }
 
 div.routing-search-field {
-    display: flex;
     margin-bottom: 0.25em;
+    width: 100%;
 }
 
-div.routing-search-field input.search-widget-input[type=text] {
-    border: none;
-    outline: none;
-    height: calc(2em - 2px);
-}
-
-div.routing-search-field button.button {
-    border-right: none;
-    width: 2em;
+div.routing-search-field > div {
+    flex: 1 1 auto;
 }
 
 button.routing-compute-button {

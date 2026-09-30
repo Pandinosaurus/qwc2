@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -28,12 +28,13 @@ export function processStarted(id, name) {
     };
 }
 
-export function processFinished(id, success, message = "") {
+export function processFinished(id, success, message = "", timeout = true) {
     return {
         type: PROCESS_FINISHED,
         id,
         success,
-        message
+        message,
+        timeout
     };
 }
 

@@ -1,14 +1,17 @@
 /**
  * Copyright 2015-2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
+import isEmpty from 'lodash.isempty';
+
 import ConfigUtils from './ConfigUtils';
 import CoordinatesUtils from './CoordinatesUtils';
+import {UrlParams} from './PermaLinkUtils';
 
 
 const DEFAULT_SCREEN_DPI = 96;
@@ -25,7 +28,10 @@ const MapUtils = {
 
     GET_PIXEL_FROM_COORDINATES_HOOK: 'GET_PIXEL_FROM_COORDINATES_HOOK',
     GET_COORDINATES_FROM_PIXEL_HOOK: 'GET_COORDINATES_FROM_PIXEL_HOOK',
+    GET_SNAPPED_COORDINATES_FROM_PIXEL_HOOK: 'GET_SNAPPED_COORDINATES_FROM_PIXEL_HOOK',
     GET_NATIVE_LAYER: 'GET_NATIVE_LAYER',
+    ADD_POINTER_MOVE_LISTENER: 'ADD_POINTER_MOVE_LISTENER',
+    REMOVE_POINTER_MOVE_LISTENER: 'REMOVE_POINTER_MOVE_LISTENER',
     GET_MAP: 'GET_MAP',
 
     registerHook(name, hook) {
@@ -40,15 +46,6 @@ const MapUtils = {
      */
     dpi2dpm(dpi) {
         return (dpi || DEFAULT_SCREEN_DPI) * (100 / 2.54);
-    },
-    /**
-     * @param dpi {number} screen resolution in dots per inch.
-     * @param projection {string} map projection.
-     * @return {number} dots per map unit.
-     */
-    dpi2dpu(dpi, projection) {
-        const units = CoordinatesUtils.getUnits(projection);
-        return METERS_PER_UNIT[units] * MapUtils.dpi2dpm(dpi);
     },
     /**
      * Get a list of scales for each zoom level of the Google Mercator.
@@ -75,9 +72,9 @@ const MapUtils = {
      * @return {array} a list of resolutions corresponding to the given scales, projection and dpi.
      */
     getResolutionsForScales(scales, projection, dpi = DEFAULT_SCREEN_DPI) {
-        const dpu = MapUtils.dpi2dpu(dpi, projection);
+        const units = CoordinatesUtils.getUnits(projection);
         const resolutions = scales.map((scale) => {
-            return scale / dpu;
+            return scale * 0.0254 / (dpi * METERS_PER_UNIT[units]);
         });
         return resolutions;
     },
@@ -100,15 +97,9 @@ const MapUtils = {
         const yResolution = Math.abs(hExtent / mapSize.height);
         const extentResolution = Math.max(xResolution, yResolution);
 
-        if (ConfigUtils.getConfigProp("allowFractionalZoom") === true) {
-            return Math.max(minZoom, Math.min(this.computeZoom(resolutions, extentResolution), maxZoom));
-        } else {
-            const calc = resolutions.reduce((previous, resolution, index) => {
-                const diff = Math.abs(resolution - extentResolution);
-                return diff > previous.diff ? previous : {diff: diff, zoom: index};
-            }, {diff: Number.POSITIVE_INFINITY, zoom: 0});
-            return Math.max(minZoom, Math.min(calc.zoom, maxZoom));
-        }
+        const fractionalZoom = this.computeFractionalZoom(resolutions, extentResolution);
+        const fittingZoom = ConfigUtils.getConfigProp("allowFractionalZoom") === true ? fractionalZoom : Math.floor(fractionalZoom);
+        return Math.max(minZoom, Math.min(fittingZoom, maxZoom));
     },
     /**
      * Calculates the extent for the provided center and zoom level
@@ -174,6 +165,22 @@ const MapUtils = {
         return list[lower] * (1 - frac) + list[upper] * frac;
     },
     /**
+     * Compute the exact, fractional zoom level matching the specified scale or resolution.
+     *
+     * @param list {Array} List of scales or resolutions.
+     * @param value (number) Scale or resolution.
+     * @return Fractional zoom level matching the specified scale or resolution.
+     */
+    computeFractionalZoom(list, value) {
+        let index = 0;
+        for (let i = 1; i < list.length - 1; ++i) {
+            if (value <= list[i]) {
+                index = i;
+            }
+        }
+        return index + (value - list[index]) / (list[index + 1] - list[index]);
+    },
+    /**
      * Compute the (possibly fractional) zoom level matching the specified scale or resolution.
      *
      * @param list {Array} List of scales or resolutions.
@@ -182,13 +189,7 @@ const MapUtils = {
      */
     computeZoom(list, value) {
         if (ConfigUtils.getConfigProp("allowFractionalZoom") === true) {
-            let index = 0;
-            for (let i = 1; i < list.length - 1; ++i) {
-                if (value <= list[i]) {
-                    index = i;
-                }
-            }
-            return index + (value - list[index]) / (list[index + 1] - list[index]);
+            return this.computeFractionalZoom(list, value);
         } else {
             let closestVal = Math.abs(value - list[0]);
             let closestIdx = 0;
@@ -211,6 +212,31 @@ const MapUtils = {
     degreesToRadians(degrees) {
         const pi = Math.PI;
         return degrees * (pi / 180);
+    },
+
+    updateMapUrlParams(state) {
+        const newParams = {};
+        const positionFormat = ConfigUtils.getConfigProp("urlPositionFormat");
+        const positionCrs = ConfigUtils.getConfigProp("urlPositionCrs") || state.projection;
+        const prec = CoordinatesUtils.getPrecision(positionCrs);
+        // Don't set params for empty map
+        if (state.bbox.bounds.every(x => x === 0)) {
+            return;
+        }
+        if (positionFormat === "centerAndZoom") {
+            const center = CoordinatesUtils.reproject(state.center, state.projection, positionCrs);
+            const scale = Math.round(MapUtils.computeForZoom(state.scales, state.zoom));
+            Object.assign(newParams, {c: center.map(x => x.toFixed(prec)).join(","), s: scale});
+        } else {
+            const bounds = CoordinatesUtils.reprojectBbox(state.bbox.bounds, state.projection, positionCrs);
+            Object.assign(newParams, {e: bounds.map(x => x.toFixed(prec)).join(",")});
+        }
+        if (positionCrs !== state.projection) {
+            Object.assign(newParams, {crs: positionCrs});
+        }
+        if (!isEmpty(newParams)) {
+            UrlParams.updateParams(newParams);
+        }
     }
 };
 

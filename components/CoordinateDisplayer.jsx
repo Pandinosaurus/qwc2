@@ -1,5 +1,5 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,37 +7,47 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
-import {connect} from 'react-redux';
+
 import CoordinatesUtils from '../utils/CoordinatesUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MapUtils from '../utils/MapUtils';
 
-class CoordinateDisplayer extends React.Component {
+export default class CoordinateDisplayer extends React.Component {
     static propTypes = {
         className: PropTypes.string,
-        coordinate: PropTypes.object,
-        displaycrs: PropTypes.string,
-        mapcrs: PropTypes.string,
-        mousepos: PropTypes.object
+        coordinateFormatter: PropTypes.func,
+        displayCrs: PropTypes.string,
+        mapCrs: PropTypes.string
     };
+    state = {
+        mousePos: null
+    };
+    componentDidMount() {
+        MapUtils.getHook(MapUtils.ADD_POINTER_MOVE_LISTENER)(this.getMapMousePos);
+    }
+    componentWillUnmount() {
+        MapUtils.getHook(MapUtils.REMOVE_POINTER_MOVE_LISTENER)(this.getMapMousePos);
+    }
     render() {
         let value = "";
-        if (this.props.mousepos) {
-            const coo = CoordinatesUtils.reproject(this.props.mousepos.coordinate, this.props.mapcrs, this.props.displaycrs);
-            if (!isNaN(coo[0]) && !isNaN(coo[1])) {
-                const digits = CoordinatesUtils.getUnits(this.props.displaycrs) === 'degrees' ? 4 : 0;
-                value = LocaleUtils.toLocaleFixed(coo[0], digits) + " " + LocaleUtils.toLocaleFixed(coo[1], digits);
+        if (this.state.mousePos !== null) {
+            const coo = CoordinatesUtils.reproject(this.state.mousePos, this.props.mapCrs, this.props.displayCrs);
+            if (this.props.coordinateFormatter) {
+                value = this.props.coordinateFormatter(coo, this.props.displayCrs);
+            } else if (!isNaN(coo[0]) && !isNaN(coo[1])) {
+                const decimals = CoordinatesUtils.getPrecision(this.props.displayCrs);
+                value = LocaleUtils.toLocaleFixed(coo[0], decimals) + " " + LocaleUtils.toLocaleFixed(coo[1], decimals);
             }
         }
         return (
             <input className={this.props.className} readOnly="readOnly" type="text" value={value}/>
         );
     }
+    getMapMousePos = (ev) => {
+        if (ev.coordinate) {
+            this.setState({mousePos: ev.coordinate});
+        }
+    };
 }
-
-const selector = state => ({
-    mapcrs: state.map.projection,
-    mousepos: state.mousePosition.position
-});
-
-export default connect(selector)(CoordinateDisplayer);

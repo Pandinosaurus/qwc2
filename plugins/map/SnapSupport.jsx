@@ -6,23 +6,28 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import axios from 'axios';
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import axios from 'axios';
 import ol from 'openlayers';
+import PropTypes from 'prop-types';
 import {v4 as uuidv4} from 'uuid';
+
 import {LayerRole} from '../../actions/layers';
-import IdentifyUtils from '../../utils/IdentifyUtils';
 import FeatureStyles from "../../utils/FeatureStyles";
+import IdentifyUtils from '../../utils/IdentifyUtils';
+import MapUtils from '../../utils/MapUtils';
 
 class SnapSupport extends React.Component {
     static propTypes = {
         drawing: PropTypes.bool,
         layers: PropTypes.array,
         map: PropTypes.object,
-        mapObj: PropTypes.object,
-        mousepos: PropTypes.object
+        mapObj: PropTypes.object
+    };
+    state = {
+        mousePos: null
     };
     constructor(props) {
         super(props);
@@ -38,26 +43,35 @@ class SnapSupport extends React.Component {
         this.snapLayer = new ol.layer.Vector({
             source: this.snapSource,
             zIndex: 1000000,
-            style: [
-                FeatureStyles.interaction( {}, true),
+            style: feature => ([
+                FeatureStyles.interaction(feature, {}, true),
                 FeatureStyles.interactionVertex({geometryFunction}, true)
-            ]
+            ].flat())
         });
         this.props.map.addLayer(this.snapLayer);
         this.curPos = null;
     }
+    componentDidMount() {
+        MapUtils.getHook(MapUtils.ADD_POINTER_MOVE_LISTENER)(this.getMapMousePos);
+    }
+    componentWillUnmount() {
+        MapUtils.getHook(MapUtils.REMOVE_POINTER_MOVE_LISTENER)(this.getMapMousePos);
+    }
     componentDidUpdate(prevProps) {
-        if (prevProps.drawing && this.props.mousepos &&
+        if (this.props.drawing && this.state.mousePos &&
                 (!this.curPos ||
-                Math.abs(this.props.mousepos.pixel[0] - this.curPos[0]) > 5 ||
-                Math.abs(this.props.mousepos.pixel[1] - this.curPos[1]) > 5)) {
+                Math.abs(this.state.mousePos.pixel[0] - this.curPos[0]) > 5 ||
+                Math.abs(this.state.mousePos.pixel[1] - this.curPos[1]) > 5)) {
             clearTimeout(this.timeoutId);
-            this.curPos = this.props.mousepos.pixel;
+            this.curPos = this.state.mousePos.pixel;
             this.timeoutId = setTimeout(() => this.getFeature(), 500);
-        } else if (!prevProps) {
+        } else if (!this.props.drawing && prevProps.drawing) {
             this.reset();
         }
     }
+    getMapMousePos = (ev) => {
+        this.setState({mousePos: ev.pixel === null ? null : {coordinate: ev.coordinate, pixel: ev.pixel}});
+    };
     addSnapFeatures = (geojson) => {
         this.reset();
         const format = new ol.format.GeoJSON();
@@ -73,12 +87,12 @@ class SnapSupport extends React.Component {
     getFeature = () => {
         this.timeoutId = null;
 
-        const layers = this.props.layers.find(layer => layer.role === LayerRole.THEME);
-        const queryLayers = this.props.layers.reduce((accum, layer) => {
-            return layer.role === LayerRole.THEME ? accum.concat(layer.queryLayers) : accum;
+        const layer = this.props.layers.find(l => l.role === LayerRole.THEME);
+        const queryLayers = this.props.layers.reduce((accum, l) => {
+            return l.role === LayerRole.THEME ? accum.concat(l.queryLayers) : accum;
         }, []).join(",");
 
-        if (!layers || !queryLayers) {
+        if (!layer || !queryLayers) {
             return;
         }
 
@@ -90,9 +104,9 @@ class SnapSupport extends React.Component {
             FI_POLYGON_TOLERANCE: 4
         };
 
-        const request = IdentifyUtils.buildRequest(layers, queryLayers, this.props.mousepos.coordinate, this.props.mapObj, options);
+        const request = IdentifyUtils.buildRequest(layer, queryLayers, this.state.mousePos.coordinate, this.props.mapObj, options);
         axios.get(request.url, {params: request.params}).then(response => {
-            const results = IdentifyUtils.parseXmlResponse(response.data, this.props.mapObj.projection);
+            const results = IdentifyUtils.parseXmlResponse(response.data, this.props.mapObj.projection, layer);
             const features = [];
             results.forEach(result => {
                 for (const feature of result) {
@@ -136,9 +150,8 @@ class SnapSupport extends React.Component {
 }
 
 const selector = (state) => ({
-    drawing: state.task.id === "Redlining" || state.task.id === "Measure" || state.task.id === "Editing" ? true : false,
+    drawing: ["Redlining", "Measure", "Editing"].includes(state.task.id),
     mapObj: state.map,
-    mousepos: state.mousePosition.position,
     layers: state.layers.flat
 });
 

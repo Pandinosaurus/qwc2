@@ -1,0 +1,1375 @@
+/**
+ * Copyright Sourcepole AG
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+import React, { Suspense } from 'react';
+import ReactDOM from 'react-dom';
+import {connect} from 'react-redux';
+
+import Coordinates from '@giro3d/giro3d/core/geographic/Coordinates';
+import CoordinateSystem from '@giro3d/giro3d/core/geographic/CoordinateSystem';
+import Ellipsoid from '@giro3d/giro3d/core/geographic/Ellipsoid';
+import Extent from '@giro3d/giro3d/core/geographic/Extent.js';
+import Instance from '@giro3d/giro3d/core/Instance.js';
+import ElevationLayer from '@giro3d/giro3d/core/layer/ElevationLayer.js';
+import Map from '@giro3d/giro3d/entities/Map.js';
+import Tiles3D from "@giro3d/giro3d/entities/Tiles3D.js";
+import Inspector from "@giro3d/giro3d/gui/Inspector.js";
+import GeoTIFFSource from "@giro3d/giro3d/sources/GeoTIFFSource.js";
+import axios from 'axios';
+import {fromUrl} from "geotiff";
+import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+import * as THREE from 'three';
+import {Vector2, CubeTextureLoader, Group, Raycaster, Mesh, Box3, Vector3, Matrix4, EventDispatcher, Points} from 'three';
+import {
+    computeBoundsTree, disposeBoundsTree,
+    computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast
+} from 'three-mesh-bvh';
+import {GLTFExporter} from 'three/addons/exporters/GLTFExporter.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader';
+import {v4 as uuidv4} from 'uuid';
+
+import {LayerRole} from '../../actions/layers';
+import {setCurrentTask} from '../../actions/task';
+import ConfigUtils from '../../utils/ConfigUtils';
+import CoordinatesUtils from '../../utils/CoordinatesUtils';
+import LayerUtils from '../../utils/LayerUtils';
+import LocaleUtils from '../../utils/LocaleUtils';
+import MiscUtils from '../../utils/MiscUtils';
+import {registerPermalinkDataStoreHook, unregisterPermalinkDataStoreHook, UrlParams} from '../../utils/PermaLinkUtils';
+import ServiceLayerUtils from '../../utils/ServiceLayerUtils';
+import ThemeUtils from '../../utils/ThemeUtils';
+import {MapContainerPortalContext} from '../PluginsContainer';
+import ViewSwitcher from '../ViewSwitcher';
+import ColorLayer3D from './ColorLayer3D';
+import EditDataset3D from './EditDataset3D';
+import LayerRegistry from './layers/index';
+import MapControls3D from './MapControls3D';
+import {updateObjectLabel} from './utils/MiscUtils3D';
+import Tiles3DStyle from './utils/Tiles3DStyle';
+
+import './style/Map3D.css';
+
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+THREE.BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
+THREE.BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
+THREE.BatchedMesh.prototype.raycast = acceleratedRaycast;
+
+
+// Ensures onUnload is called *after* all other children have unmounted
+class UnloadWrapper extends React.Component {
+    static propTypes = {
+        children: PropTypes.oneOfType([PropTypes.node, PropTypes.func]),
+        onUnload: PropTypes.func,
+        sceneId: PropTypes.string
+    };
+    onUnload = (el) => {
+        if (!el) {
+            this.props.onUnload(this.props.sceneId);
+        }
+    };
+    render() {
+        return (
+            <div>
+                {this.props.children}
+                <span ref={this.onUnload} />
+            </div>
+        );
+    }
+}
+
+class Map3D extends React.Component {
+    static contextType = MapContainerPortalContext;
+    static propTypes = {
+        controlsPosition: PropTypes.string,
+        defaultColorLayerVisibility: PropTypes.bool,
+        defaultFov: PropTypes.number,
+        defaultPointSize: PropTypes.number,
+        defaultSceneQuality: PropTypes.number,
+        defaultSync2dLayers: PropTypes.bool,
+        forceAllowInspector: PropTypes.bool,
+        innerRef: PropTypes.func,
+        layers: PropTypes.array,
+        mouseButtons: PropTypes.object,
+        onCameraChanged: PropTypes.func,
+        onMapInitialized: PropTypes.func,
+        pluginOptions: PropTypes.object,
+        plugins3d: PropTypes.object,
+        setCurrentTask: PropTypes.func,
+        theme: PropTypes.object,
+        themes: PropTypes.object
+    };
+    static defaultProps = {
+        geometry: {
+            initialWidth: 600,
+            initialHeight: 800,
+            initialX: 0,
+            initialY: 0,
+            initiallyDocked: true
+        }
+    };
+    static defaultSceneState = {
+        scene: null,
+        map: null,
+        mapCrs: null,
+        dtmUrl: null,
+        dtmCrs: null,
+        baseLayers: [],
+        colorLayers: {},
+        objectTree: {},
+        collisionObjects: [],
+        snapObjects: [],
+        settings: {
+            fov: 30,
+            pointSize: 0,
+            sceneQuality: 100
+        },
+        sceneId: null,
+        rebuildInstance: false
+    };
+    state = {
+        sceneContext: {
+            ...Map3D.defaultSceneState,
+
+            addLayer: (layer) => {},
+            getLayer: (layerId) => {},
+            removeLayer: (layerId) => {},
+            updateColorLayer: (layerId, options, flags) => {},
+            setBaseLayer: (layer, visibility) => {},
+
+            importTiles3D: (url, name, addToLayerTree = false, treeOptions = {}, showEditTool = false, matrix = null, label = null) => {},
+            importObject3D: (dataOrUrl, name, addToLayerTree = false, treeOptions = {}, showEditTool = false) => {},
+            addSceneObject: (objectId, object, options = {}, addToLayerTree = false, showEditTool = false) => {},
+            getSceneObject: (objectId) => {},
+            removeSceneObject: (objectId) => {},
+            updateSceneObject: (objectId, options, flags) => {},
+            zoomToObject: (objectId) => {},
+            objectIsVisible: (objectId) => {},
+            objectContainsPoints: (object) => {},
+
+            addObjectAddedListener: (callback) => {},
+            removeObjectAddedListener: (callback) => {},
+
+            getMap: () => {},
+
+            computeBoundsTree: (object) => {},
+
+            setViewToExtent: (bounds, angle) => {},
+            getTerrainHeightFromDTM: (scenePos) => {},
+            getTerrainHeightFromMap: (scenePos) => {},
+            getSceneIntersection: (x, y, objects) => {},
+
+            getSetting: (key) => {},
+            setSetting: (key, value) => {}
+        }
+    };
+    constructor(props) {
+        super(props);
+        this.container = null;
+        this.inspector = null;
+        this.instance = null;
+        this.map = null;
+        this.sceneObjectGroup = null;
+        this.objectMap = {};
+        this.tilesetStyles = {};
+        this.objectAddedListeners = [];
+        this.state.sceneContext.eventDispatcher = new EventDispatcher();
+        this.state.sceneContext.addLayer = this.addLayer;
+        this.state.sceneContext.getLayer = this.getLayer;
+        this.state.sceneContext.removeLayer = this.removeLayer;
+        this.state.sceneContext.updateColorLayer = this.updateColorLayer;
+        this.state.sceneContext.setBaseLayer = this.setBaseLayer;
+        this.state.sceneContext.importTiles3D = this.importTiles3D;
+        this.state.sceneContext.importObject3D = this.importObject3D;
+        this.state.sceneContext.addSceneObject = this.addSceneObject;
+        this.state.sceneContext.getSceneObject = this.getSceneObject;
+        this.state.sceneContext.removeSceneObject = this.removeSceneObject;
+        this.state.sceneContext.updateSceneObject = this.updateSceneObject;
+        this.state.sceneContext.addObjectAddedListener = (callback) => this.objectAddedListeners.push(callback);
+        this.state.sceneContext.removeObjectAddedListener = (callback) => { this.objectAddedListeners = this.objectAddedListeners.filter(cb => cb !== callback); };
+        this.state.sceneContext.zoomToObject = this.zoomToObject;
+        this.state.sceneContext.objectIsVisible = this.objectIsVisible;
+        this.state.sceneContext.objectContainsPoints = this.objectContainsPoints;
+        this.state.sceneContext.getMap = this.getMap;
+        this.state.computeBoundsTree = this.computeBoundsTree;
+        this.state.sceneContext.getTerrainHeightFromDTM = this.getTerrainHeightFromDTM;
+        this.state.sceneContext.getTerrainHeightFromMap = this.getTerrainHeightFromMap;
+        this.state.sceneContext.getSceneIntersection = this.getSceneIntersection;
+        this.state.sceneContext.getSetting = this.getSetting;
+        this.state.sceneContext.setSetting = this.setSetting;
+
+        this.state.sceneContext.settings.fov = props.defaultFov;
+        this.state.sceneContext.settings.pointSize = props.defaultPointSize;
+        this.state.sceneContext.settings.sceneQuality = props.defaultSceneQuality;
+        this.state.sceneContext.settings.sync2dlayers = props.defaultSync2dLayers;
+
+        registerPermalinkDataStoreHook("map3d", this.store3dState);
+    }
+    componentDidMount() {
+        this.props.innerRef(this);
+        window.qwc2.__3dscenecontext = () => this.state.sceneContext;
+    }
+    componentWillUnmount() {
+        unregisterPermalinkDataStoreHook("map3d");
+        window.qwc2.__3dscenecontext = undefined;
+    }
+    componentDidUpdate(prevProps, prevState) {
+        if (this.props.theme !== prevProps.theme) {
+            if (this.props.theme.map3d) {
+                this.setState(state => ({
+                    sceneContext: {
+                        ...state.sceneContext,
+                        rebuildInstance: true
+                    }
+                }));
+            }
+        }
+        if (!this.instance) {
+            return;
+        }
+
+        // Update 2D color layers
+        const sync2denabled = this.state.sceneContext.settings.sync2dlayers && !prevState.sceneContext.settings.sync2dlayers;
+        if (this.props.layers !== prevProps.layers || sync2denabled) {
+            this.setState((state) => ({
+                sceneContext: {
+                    ...state.sceneContext,
+                    colorLayers: this.collectColorLayers(state.sceneContext.colorLayers, prevProps.layers, sync2denabled)
+                }
+            }));
+        }
+
+        // Update collision objects
+        if (this.state.sceneContext.objectTree !== prevState.sceneContext.objectTree) {
+            this.setState(state => ({
+                sceneContext: {
+                    ...state.sceneContext,
+                    collisionObjects: Object.keys(state.sceneContext.objectTree).reduce((res, objectId) => {
+                        const obj = this.objectMap[objectId];
+                        if (obj?.visible) {
+                            res.push(obj.tiles?.group ?? obj);
+                        }
+                        return res;
+                    }, []),
+                    snapObjects: Object.entries(state.sceneContext.objectTree).reduce((res, [objectId, entry]) => {
+                        const obj = this.objectMap[objectId];
+                        if (obj?.visible && entry.snap) {
+                            res.push(obj.tiles?.group ?? obj);
+                        }
+                        return res;
+                    }, [])
+                }
+            }));
+        }
+        if (this.state.sceneContext.settings.fov !== prevState.sceneContext.settings.fov) {
+            this.instance.view.camera.fov = this.state.sceneContext.settings.fov;
+            this.instance.notifyChange(this.instance.view.camera);
+        }
+        if (this.state.sceneContext.settings.pointSize !== prevState.sceneContext.settings.pointSize) {
+            Object.values(this.state.sceneContext.objectTree).map((entry) => {
+                const obj = this.state.sceneContext.getSceneObject(entry.objectId);
+                if (this.objectContainsPoints(obj)) {
+                    obj.pointSize = this.state.sceneContext.settings.pointSize;
+                    this.instance.notifyChange(obj);
+                }
+            });
+        }
+        if (this.state.sceneContext.settings.sceneQuality !== prevState.sceneContext.settings.sceneQuality) {
+            const quality = Math.max(20, this.state.sceneContext.settings.sceneQuality);
+            this.map.segments = Math.pow(2, Math.floor(quality / 20));
+            this.instance.notifyChange(this.instance.view.camera);
+            this.instance.getEntities().filter(entity => entity.tiles?.lruCache).forEach(entity => {
+                const gigabyteBytes = 2 ** 30;
+                entity.tiles.lruCache.maxBytesSize = 0.5 * gigabyteBytes * (1 + this.state.sceneContext.settings.sceneQuality / 100);
+            });
+        }
+    }
+    setBaseLayer = (layer, visibility) => {
+        const currentBaseLayer = this.state.sceneContext.baseLayers.find(l => l.visibility === true)?.name || null;
+        if (visibility && layer.name === currentBaseLayer) {
+            // Nothing changed
+            return;
+        }
+        if (visibility !== !!(this.map.backgroundOpacity)) {
+            const dtm = this.getLayer("__dtm");
+            if (dtm) {
+                dtm.visible = visibility;
+            }
+            this.map.receiveShadow = visibility;
+            this.map.backgroundOpacity = visibility ? 1 : 0;
+            this.instance.notifyChange(this.map);
+        }
+        UrlParams.updateParams({bl3d: !visibility ? 'null' : layer.name});
+        this.setState(state => ({
+            sceneContext: {
+                ...state.sceneContext,
+                baseLayers: state.sceneContext.baseLayers.map(entry => (
+                    {...entry, visibility: entry.name === layer.name ? visibility : false}
+                ))
+            }
+        }));
+    };
+    collectColorLayers = (prevColorLayers, prevLayers, force = false) => {
+        const prevLayerMap = prevLayers.reduce((res, layer) => ({...res, [layer.id]: layer}), {});
+        const showRootEntry = ConfigUtils.getPluginConfig("LayerTree")?.cfg?.showRootEntry !== false;
+        return this.props.layers.reduce((colorLayers, layer) => {
+            if (layer.role !== LayerRole.THEME && layer.role !== LayerRole.USERLAYER) {
+                return colorLayers;
+            }
+            const prevOptions = prevColorLayers[layer.id];
+            if (prevOptions && layer === prevLayerMap[layer.id] && !force) {
+                colorLayers[layer.id] = prevOptions;
+                return colorLayers;
+            }
+            const layerCreator = LayerRegistry[layer.type];
+            if (!layerCreator || !layerCreator.create3d) {
+                return colorLayers;
+            }
+            const preserveSublayerOptions = (entry, prevEntry) => {
+                return entry.sublayers?.map?.(child => {
+                    const prevChild = prevEntry?.sublayers?.find?.(x => x.name === child.name);
+                    if (prevChild) {
+                        if (this.state.sceneContext.settings.sync2dlayers) {
+                            return {...child};
+                        } else {
+                            return {
+                                ...child,
+                                visibility: prevChild.visibility,
+                                opacity: prevChild.opacity,
+                                sublayers: preserveSublayerOptions(child, prevChild, false)
+                            };
+                        }
+                    } else {
+                        return {
+                            ...child,
+                            visibility: entry?.role === LayerRole.THEME && !showRootEntry && !this.state.sceneContext.settings.sync2dlayers ? this.props.defaultColorLayerVisibility : child.visibility
+                        };
+                    }
+                });
+            };
+            colorLayers[layer.id] = {
+                ...layer,
+                projection: prevOptions?.projection ?? this.props.theme.mapCrs,
+                visibility: prevOptions?.visibility ?? (layer.role === LayerRole.THEME && !showRootEntry ? true : this.props.defaultColorLayerVisibility),
+                opacity: prevOptions?.opacity ?? 255,
+                extrusionHeight: prevOptions?.extrusionHeight ?? (layerCreator.createFeatureSource ? 0 : undefined),
+                fields: prevOptions?.fields ?? undefined,
+                sublayers: preserveSublayerOptions(layer, prevOptions)
+            };
+            Object.assign(colorLayers[layer.id], LayerUtils.buildWMSLayerParams(colorLayers[layer.id]));
+            if (layerCreator.getFields) {
+                layerCreator.getFields(layer).then(fields => {
+                    this.updateColorLayer(layer.id, {fields});
+                });
+            }
+            return colorLayers;
+        }, {});
+    };
+    addLayer = (layerId, layer) => {
+        layer.userData.layerId = layerId;
+        this.map.addLayer(layer);
+    };
+    getLayer = (layerId) => {
+        return this.map.getLayers(l => l.userData.layerId === layerId)[0] ?? null;
+    };
+    removeLayer = (layerId) => {
+        this.map.getLayers(l => l.userData.layerId === layerId).forEach(layer => {
+            this.map.removeLayer(layer, {dispose: true});
+        });
+    };
+    updateColorLayer = (layerId, options, flags = {}) => {
+        this.setState((state) => {
+            const entry = {
+                ...state.sceneContext.colorLayers[layerId]
+            };
+            let subentry = entry;
+            let parent = null;
+            (flags.path ?? []).forEach(idx => {
+                subentry.sublayers = [...subentry.sublayers];
+                subentry.sublayers[idx] = {...subentry.sublayers[idx]};
+                parent = subentry;
+                subentry = subentry.sublayers[idx];
+            });
+            const prevOptions = {...subentry};
+            Object.assign(subentry, options);
+            if (subentry.visibility !== prevOptions.visibility) {
+                if (!isEmpty(subentry.sublayers) && flags.groupTogglesSublayers) {
+                    // Propagate visibility to children
+                    const setChildVisibilities = (child) => {
+                        child.sublayers = child.sublayers.map(gchild => {
+                            const ngchild = {...gchild, visibility: options.visibility};
+                            if (!isEmpty(ngchild.sublayers)) {
+                                setChildVisibilities(ngchild);
+                            }
+                            return ngchild;
+                        });
+                    };
+                    setChildVisibilities(subentry);
+                }
+                if (parent?.mutuallyExclusive) {
+                    parent.sublayers = parent.sublayers.map(sublayer => sublayer === subentry ? subentry : ({...sublayer, visibility: false}));
+                }
+            }
+            if (subentry.opacity !== prevOptions.opacity && !isEmpty(subentry.sublayers)) {
+                // Propagate opacity to children
+                const setChildOpacities = (child) => {
+                    child.sublayers = child.sublayers.map(gchild => {
+                        const ngchild = {...gchild, opacity: options.opacity};
+                        if (!isEmpty(ngchild.sublayers)) {
+                            setChildOpacities(ngchild);
+                        }
+                        return ngchild;
+                    });
+                };
+                setChildOpacities(subentry);
+            }
+            if (entry.type === "wms") {
+                Object.assign(entry, LayerUtils.buildWMSLayerParams(entry));
+            }
+            return {
+                sceneContext: {
+                    ...state.sceneContext,
+                    colorLayers: {
+                        ...state.sceneContext.colorLayers,
+                        [layerId]: entry
+                    }
+                }
+            };
+        });
+    };
+    importTiles3D = (url, objectId, addToLayerTree = false, treeOptions = {}, showEditTool = false, matrix = null, label = null) => {
+        const tiles = new Tiles3D({
+            url: MiscUtils.resolveAssetsPath(url)
+        });
+        // Recenter tile group (so that origin of transform tool is in the center of the tileset)
+        tiles.tiles.addEventListener('load-tileset', ({tileset}) => {
+            if (tileset.root.parent === null) {
+                const bbox = new Box3();
+                tiles.tiles.getBoundingBox(bbox);
+                const center = bbox.getCenter(new Vector3());
+
+                tiles.tiles.group.position.sub(center);
+                if (matrix) {
+                    tiles.tiles.group.parent.applyMatrix4(matrix);
+                } else {
+                    tiles.tiles.group.parent.position.copy(center);
+                }
+                tiles.tiles.group.parent.updateMatrixWorld(true);
+                if (label) {
+                    tiles.tiles.group.parent.userData.label = label;
+                    updateObjectLabel(tiles.tiles.group.parent, this.state.sceneContext);
+                }
+            }
+            this.instance.notifyChange(tiles);
+            if (showEditTool) {
+                this.props.setCurrentTask("EditDataset3D", null, null, {objectId: objectId});
+            }
+        });
+        tiles.tiles.addEventListener('needs-update', () => {
+            this.instance.notifyChange(tiles);
+        });
+
+        // Apply style when loading tile
+        tiles.tiles.addEventListener('load-model', ({scene}) => {
+            scene.userData.tilesetName = objectId;
+            scene.userData.featureIdAttr = "id";
+            Tiles3DStyle.applyTileStyle(scene, tiles.userData, this.state.sceneContext);
+            if (this.objectContainsPoints(tiles)) {
+                tiles.pointSize = this.state.sceneContext.settings.pointSize;
+            }
+            this.computeBoundsTree(scene);
+            this.instance.notifyChange(tiles);
+            this.notifyObjectAdded(scene);
+        });
+        // Show/hide labels when tile visibility changes
+        tiles.tiles.addEventListener('tile-visibility-change', ({scene, visible}) => {
+            Object.values(scene?.userData?.tileLabels ?? {}).forEach(l => {
+                l.labelObject.visible = visible;
+                l.labelObject.element.style.display = visible ? 'initial' : 'none';
+            });
+            if (visible) {
+                this.notifyObjectAdded(scene);
+            }
+        });
+        tiles.castShadow = true;
+        tiles.receiveShadow = true;
+        this.addSceneObject(objectId, tiles, addToLayerTree, treeOptions);
+    };
+    importObject3D = (dataOrUrl, objectId, addToLayerTree = false, treeOptions = {}, showEditTool = false, callback = null) => {
+        const loader = new GLTFLoader();
+        const processor = (gltf) => {
+            let root = gltf.scene;
+            if (root.children.length === 1 && root.children[0].isGroup) {
+                root = root.children[0];
+            }
+            // GLTF is Y-UP, we need Z-UP
+            root.rotation.x += Math.PI / 2;
+            root.updateMatrixWorld(true);
+
+            root.castShadow = true;
+            root.receiveShadow = true;
+            root.traverse(c => {
+                if (c.geometry) {
+                    c.castShadow = true;
+                    c.receiveShadow = true;
+                }
+                updateObjectLabel(c, this.state.sceneContext);
+            });
+
+            // Shift root position to center of object
+            const box = new Box3().setFromObject(root);
+            const centerWorld = box.getCenter(new Vector3());
+            centerWorld.z = box.min.z;
+            const centerLocal = root.worldToLocal(centerWorld.clone());
+            root.position.add(centerWorld);
+
+            // Offset children back so the world positions remain unchanged
+            root.children.forEach(child => {
+                child.position.sub(centerLocal);
+            });
+            root.updateMatrixWorld(true);
+
+            this.addSceneObject(objectId, root, addToLayerTree, treeOptions, showEditTool);
+            callback?.();
+        };
+        if (typeof dataOrUrl === 'string') {
+            loader.load(dataOrUrl, processor, () => {}, (err) => {
+                /* eslint-disable-next-line */
+                console.warn(err);
+            });
+        } else {
+            loader.parse(dataOrUrl, ConfigUtils.getAssetsPath(), processor, (err) => {
+                /* eslint-disable-next-line */
+                console.warn(err);
+            });
+        }
+    };
+    computeBoundsTree = (group) => {
+        group.traverse(c => {
+            c.geometry?.computeBoundsTree?.();
+        });
+    };
+    addSceneObject = (objectId, object, addToLayerTree = false, treeOptions = {}, showEditTool = false, callback = null) => {
+        if (object.isEntity3D) {
+            this.instance.add(object).then((entity) => {
+                if (entity.tiles?.lruCache) {
+                    // LRU Cache between .5 GB and 1 GB depending on scene quality
+                    const gigabyteBytes = 2 ** 30;
+                    entity.tiles.lruCache.maxBytesSize = 0.5 * gigabyteBytes * (1 + this.state.sceneContext.settings.sceneQuality / 100);
+                }
+                callback?.();
+            });
+        } else {
+            this.sceneObjectGroup.add(object);
+            this.notifyObjectAdded(object);
+            callback?.();
+        }
+        this.objectMap[objectId] = object;
+        this.instance.notifyChange(object);
+        if (addToLayerTree) {
+            this.computeBoundsTree(object);
+            this.setState((state) => {
+                const newObjectTree = {...state.sceneContext.objectTree};
+                newObjectTree.null = {...newObjectTree.null, children: [...newObjectTree.null.children, objectId]};
+                newObjectTree[objectId] = {
+                    objectId: objectId,
+                    parent: null,
+                    visibility: true,
+                    opacity: 255,
+                    snap: true,
+                    ...treeOptions
+                };
+                return {
+                    sceneContext: {...state.sceneContext, objectTree: newObjectTree}
+                };
+            });
+            object.userData.layertree = addToLayerTree;
+        }
+        if (showEditTool) {
+            this.props.setCurrentTask("EditDataset3D", null, null, {objectId: objectId});
+        }
+    };
+    getSceneObject = (objectId) => {
+        return this.objectMap[objectId];
+    };
+    removeSceneObject = (objectId, callback = undefined) => {
+        const object = this.objectMap[objectId];
+        if (!object) {
+            return;
+        }
+        if (object.isEntity3D) {
+            this.instance.remove(object);
+        } else {
+            this.sceneObjectGroup.remove(object);
+        }
+        // Ensure labels are removed
+        object.traverse(c => {
+            if (c.isCSS2DObject && c.element.parentNode) {
+                c.element.parentNode.removeChild(c.element);
+            }
+        });
+        if (object.tiles) {
+            this.instance.remove(object);
+        } else {
+            this.sceneObjectGroup.remove(object);
+        }
+        delete this.objectMap[objectId];
+        this.instance.notifyChange();
+        if (objectId in this.state.sceneContext.objectTree) {
+            this.setState((state) => {
+                const newObjectTree = {...state.sceneContext.objectTree};
+                const parentId = newObjectTree[objectId].parent;
+                newObjectTree[parentId] = {
+                    ...newObjectTree[parentId],
+                    children: newObjectTree[parentId].children.filter(x => x !== objectId)
+                };
+                delete newObjectTree[objectId];
+                return {
+                    sceneContext: {
+                        ...state.sceneContext,
+                        objectTree: newObjectTree
+                    }
+                };
+            }, callback);
+        } else {
+            callback?.();
+        }
+    };
+    updateSceneObject = (objectId, options, flags = {}) => {
+        this.setState((state) => {
+            const objectTree = {...state.sceneContext.objectTree};
+            const prevOptions = objectTree[objectId] || {};
+            options = {...prevOptions, ...options};
+            // Don't allow hiding the visible child of a mutex group
+            if (objectTree[options.parent]?.mutuallyExclusive && !options.visibility && prevOptions.visibility) {
+                options.visibility = true;
+            }
+            if (options.objectId) {
+                this.applySceneObjectState(objectId, options, prevOptions, objectTree);
+            } else if (options.children && options.visibility !== prevOptions.visibility) {
+                this.setChildObjectVisibility(objectTree, options.children, options.visibility, flags.groupTogglesSublayers);
+            }
+            return {
+                sceneContext: {
+                    ...state.sceneContext,
+                    objectTree: {...objectTree, [objectId]: options}
+                }
+            };
+        });
+    };
+    applySceneObjectState = (objectId, options, prevOptions, objectTree) => {
+        const object = this.objectMap[objectId];
+        if (!object) {
+            return;
+        }
+        let changed = false;
+        if (options.visibility !== prevOptions.visibility || options.opacity !== prevOptions?.opacity) {
+            // Visible if object is visible and parents also
+            let isVisible = options.opacity > 0 && options.visibility;
+            for (let curId = options.parent; isVisible && curId !== undefined; curId = objectTree[curId].parent) {
+                isVisible &&= objectTree[curId].visibility;
+            }
+            changed |= object.visible !== isVisible;
+            object.visible = isVisible;
+            if (objectTree[options.parent]?.mutuallyExclusive && objectTree[options.parent].children) {
+                objectTree[options.parent].children.forEach(child => {
+                    if (child !== objectId) {
+                        objectTree[child] = {...objectTree[child], visibility: false};
+                        if (this.objectMap[child]) {
+                            this.objectMap[child].visible = false;
+                        }
+                    }
+                });
+            }
+        }
+        if (options.opacity !== prevOptions?.opacity) {
+            if (object.opacity !== undefined) {
+                object.opacity = options.opacity / 255;
+            } else {
+                object.traverse(child => {
+                    if (child instanceof Mesh) {
+                        child.material.transparent = options.opacity < 255;
+                        child.material.opacity = options.opacity / 255;
+                        child.material.needsUpdate = true;
+                    }
+                });
+            }
+            changed = true;
+        }
+        if (changed) {
+            this.instance.notifyChange(object);
+        }
+        if (options.style !== prevOptions?.style) {
+            this.loadTilesetStyle(objectId, options.styles?.[options.style]);
+        }
+    };
+    setChildObjectVisibility = (objectTree, children, visibility, groupTogglesSublayers) => {
+        children.forEach(nodeId => {
+            if (objectTree[nodeId].children) {
+                this.setChildObjectVisibility(objectTree, objectTree[nodeId].children, visibility && objectTree[nodeId].visibility);
+            } else {
+                if (groupTogglesSublayers) {
+                    objectTree[nodeId] = {...objectTree[nodeId], visibility: visibility};
+                }
+                const child = objectTree[nodeId];
+                const newVisible = visibility && child.visibility && child.opacity > 0;
+                if (this.objectMap[child.objectId]) {
+                    const changed = newVisible !== this.objectMap[child.objectId].visible;
+                    this.objectMap[child.objectId].visible = newVisible;
+                    if (changed) {
+                        this.instance.notifyChange(this.objectMap[child.objectId]);
+                    }
+                }
+            }
+        });
+    };
+    notifyObjectAdded = (obj) => {
+        this.objectAddedListeners.forEach(listener => listener(obj));
+    };
+    loadTilesetStyle = (objectId, url) => {
+        const applyTilesetStyle = (styleurl) => {
+            const tiles3d = this.objectMap[objectId];
+            tiles3d.userData.tilesetStyle = this.tilesetStyles[styleurl];
+            tiles3d.tiles.group.children.forEach(group => {
+                Tiles3DStyle.applyTileStyle(group, tiles3d.userData, this.state.sceneContext);
+            });
+            this.instance.notifyChange(tiles3d);
+        };
+        if (this.tilesetStyles[url]) {
+            applyTilesetStyle(url);
+        } else if (url) {
+            const fullUrl = MiscUtils.resolveAssetsPath(url);
+            axios.get(fullUrl).then(response => {
+                this.tilesetStyles[url] = response.data;
+                applyTilesetStyle(url);
+            }).catch(() => {
+                this.tilesetStyles[url] = null;
+                applyTilesetStyle(url);
+            });
+        } else {
+            this.tilesetStyles[url] = null;
+            applyTilesetStyle(url);
+        }
+    };
+    zoomToObject = (objectId, margin = 20) => {
+        const obj = this.state.sceneContext.getSceneObject(objectId);
+        const bbox = new Box3();
+        if (obj?.tiles) {
+            obj.tiles.getBoundingBox(bbox);
+        } else {
+            bbox.setFromObject(obj);
+        }
+        if (!bbox.isEmpty()) {
+            const bounds = [
+                bbox.min.x - margin,
+                bbox.min.y - margin,
+                bbox.max.x + margin,
+                bbox.max.y + margin
+            ];
+            this.state.sceneContext.setViewToExtent(bounds, 0);
+        }
+    };
+    objectIsVisible = (objectId) => {
+        const objectTree = this.state.sceneContext.objectTree;
+        const options = objectTree[objectId];
+        let isVisible = options.opacity > 0 && options.visibility;
+        for (let curId = options.parent; isVisible && curId !== undefined && objectTree[curId]; curId = objectTree[curId].parent) {
+            isVisible &&= objectTree[curId].visibility;
+        }
+        return isVisible;
+    };
+    objectContainsPoints = (object) => {
+        let containsPoints = false;
+        if (object?.tiles) {
+            object.traverse((child) => {
+                if (child instanceof Points) {
+                    containsPoints = true;
+                }
+            });
+        }
+        return containsPoints;
+    };
+    getMap = () => {
+        return this.map;
+    };
+    render() {
+        return [
+            ReactDOM.createPortal((
+                <div className="map3d-map" id="map3d" key="Map3D" ref={this.setupContainer} />
+            ), this.context),
+            this.state.sceneContext.scene && !this.state.sceneContext.rebuildInstance ? (
+                <UnloadWrapper key={this.state.sceneContext.sceneId} onUnload={this.onUnload} sceneId={this.state.sceneContext.sceneId}>
+                    <MapControls3D
+                        controlsPosition={this.props.controlsPosition}
+                        mouseButtons={this.props.mouseButtons}
+                        onCameraChanged={this.onCameraChanged}
+                        onControlsSet={this.setupControls}
+                        sceneContext={this.state.sceneContext}
+                    >
+                        <EditDataset3D sceneContext={this.state.sceneContext} />
+                        <ViewSwitcher position={1} />
+                        {Object.entries(this.props.plugins3d).map(([name, Component]) => (
+                            <Suspense key={name}>
+                                <Component sceneContext={this.state.sceneContext} {...this.props.pluginOptions[name]} />
+                            </Suspense>
+                        ))}
+                        {this.renderBaseLayer()}
+                        {Object.values(this.state.sceneContext.colorLayers).map((options, idx) => (
+                            <ColorLayer3D
+                                key={options.id}
+                                map={this.map} options={options}
+                                prevLayerId={this.state.sceneContext.colorLayers[idx - 1]?.id ?? "__baselayer"}
+                                sceneContext={this.state.sceneContext}
+                            />
+                        ))}
+                    </MapControls3D>
+                </UnloadWrapper>
+            ) : null
+        ];
+    }
+    onCameraChanged = (center, camera, fov) => {
+        this.state.sceneContext.eventDispatcher.dispatchEvent({type: 'cameraChanged'});
+        this.props.onCameraChanged(center, camera, fov);
+    };
+    renderBaseLayer = () => {
+        const baseLayer = this.state.sceneContext.baseLayers.find(e => e.visibility === true);
+        return !baseLayer ? null : (
+            <ColorLayer3D key={baseLayer.name} map={this.map} options={{id: "__baselayer", ...baseLayer}} sceneContext={this.state.sceneContext} />
+        );
+    };
+    setupContainer = (el) => {
+        if (el) {
+            this.container = el;
+            el.resizeObserver = new ResizeObserver(entries => {
+                if (this.state.sceneContext.scene) {
+                    const rect = entries[0].contentRect;
+                    this.state.sceneContext.scene.view.dispatchEvent({type: 'view-resized', width: rect.width, height: rect.height});
+                }
+            });
+            el.resizeObserver.observe(el);
+            ConfigUtils.getConfigProp("projections", null, []).forEach(entry => {
+                CoordinateSystem.register(entry.code, entry.proj);
+            });
+            this.setupInstance();
+        }
+    };
+    setupInstance = () => {
+        if (this.instance) {
+            this.disposeInstance();
+        }
+        if (!this.props.theme) {
+            return;
+        }
+        const projection = this.props.theme.mapCrs;
+        const crs = CoordinateSystem.get(projection);
+
+        // Setup instance
+        this.instance = new Instance({
+            target: this.container,
+            crs: crs,
+            renderer: {
+                clearColor: 0x000000,
+                preserveDrawingBuffer: true
+            }
+        });
+        this.sceneObjectGroup = new Group();
+        this.sceneObjectGroup.name = "sceneObjects";
+        this.instance.add(this.sceneObjectGroup);
+
+        // Setup map
+        const initialBbox = this.props.theme.map3d.extent ?? this.props.theme.initialBbox;
+        const bounds = CoordinatesUtils.reprojectBbox(initialBbox.bounds, initialBbox.crs, projection);
+        const extent = new Extent(crs, bounds[0], bounds[2], bounds[1], bounds[3]);
+        this.map = new Map({
+            extent: extent,
+            backgroundColor: "white"
+        });
+        this.instance.add(this.map);
+
+        // Setup camera
+        const center = extent.center();
+        if (center.crs.isGeographic()) {
+            const position = Ellipsoid.WGS84.toCartesian(
+                center.latitude,
+                center.longitude,
+                center.altitude
+            );
+            this.instance.view.camera.position.set(position.x, position.y, 0.5 * (extent.maxX - extent.minX));
+        } else {
+            this.instance.view.camera.position.set(center.x, center.y, 0.5 * (extent.maxX - extent.minX));
+        }
+
+        // Skybox
+        const cubeTextureLoader = new CubeTextureLoader();
+        cubeTextureLoader.setPath(ConfigUtils.getAssetsPath() + "/3d/skybox/");
+        const cubeTexture = cubeTextureLoader.load([
+            "px.jpg",
+            "nx.jpg",
+            "py.jpg",
+            "ny.jpg",
+            "pz.jpg",
+            "nz.jpg"
+        ]);
+        this.instance.scene.background = cubeTexture;
+
+        // Setup elevation
+        const demUrl = MiscUtils.resolveAssetsPath(this.props.theme.map3d.dtm?.url ?? "");
+        const demCrs = CoordinateSystem.get(this.props.theme.map3d.dtm?.crs || "EPSG:3857");
+        if (demUrl) {
+            const demSource = new GeoTIFFSource({
+                url: demUrl,
+                crs: demCrs
+            });
+            const demMin = this.props.theme.map3d.dtm.min ?? undefined;
+            const demMax = this.props.theme.map3d.dtm.max ?? undefined;
+            const elevationLayer = new ElevationLayer({
+                name: 'dem',
+                extent: extent,
+                source: demSource,
+                minmax: demMin !== undefined && demMax !== undefined ? { demMin, demMax } : undefined
+            });
+            this.addLayer("__dtm", elevationLayer);
+        }
+
+        // Collect baselayers
+        const externalLayers = {};
+        const baseLayers = ThemeUtils.createThemeBackgroundLayers(this.props.theme.map3d.basemaps || [], this.props.themes, null, externalLayers);
+        baseLayers.unshift({
+            type: "blank",
+            name: "",
+            title: LocaleUtils.tr("bgswitcher.nobg")
+        });
+        for (const key of Object.keys(externalLayers)) {
+            const idx = key.indexOf(":");
+            const service = key.slice(0, idx);
+            const serviceUrl = key.slice(idx + 1);
+            ServiceLayerUtils.findLayers(service, serviceUrl, externalLayers[key], projection, (id, layer) => {
+                // Don't expose sublayers
+                if (layer) {
+                    layer.sublayers = null;
+                }
+                this.setState(state => ({
+                    sceneContext: {
+                        ...state.sceneContext,
+                        baseLayers: LayerUtils.replacePlaceholderLayer(state.sceneContext.baseLayers, id, layer)
+                    }
+                }));
+            });
+        }
+
+        // Collect color layers
+        const colorLayers = this.collectColorLayers([], []);
+
+        this.objectMap = {};
+
+        const objects = [...this.props.theme.map3d.objects ?? []];
+        // Convert legacy flat lists to tree
+        (this.props.theme.map3d.tiles3d || []).forEach(entry => {
+            objects.push({...entry, type: "tiles3d"});
+        });
+        (this.props.theme.map3d.objects3d || []).forEach(entry => {
+            objects.push({...entry, type: "object3d"});
+        });
+
+        // Add objects and build tree
+        const objectTree = {
+            [null]: {parent: undefined, children: [], visibility: true}
+        };
+        const buildObjectTree = (entries, parentId) => {
+            const nodeIds = [];
+            entries.forEach(entry => {
+                if (entry.type === "group") {
+                    const groupId = uuidv4();
+                    objectTree[groupId] = {
+                        parent: parentId,
+                        title: entry.title,
+                        visibility: entry.visibility ?? true,
+                        mutuallyExclusive: entry.mutuallyExclusive ?? false,
+                        expanded: entry.expanded ?? true
+                    };
+                    // Need this separately to ensure object[groupId] is already assigned
+                    objectTree[groupId].children = buildObjectTree(entry.items, groupId);
+                    if (entry.mutuallyExclusive) {
+                        // Ensure only one child is visible
+                        let haveVisibleChild = false;
+                        objectTree[groupId].children.forEach(childId => {
+                            objectTree[childId].visibility = objectTree[childId].visibility && !haveVisibleChild;
+                            haveVisibleChild |= objectTree[childId].visibility;
+                        });
+                    }
+                    nodeIds.push(groupId);
+                } else if (entry.type === "tiles3d") {
+                    objectTree[entry.name] = {
+                        objectId: entry.name,
+                        parent: parentId,
+                        title: entry.title ?? entry.name,
+                        visibility: entry.visibility ?? true,
+                        snap: entry.snap ?? true,
+                        opacity: 255,
+                        styles: entry.styles || {},
+                        style: entry.style || Object.keys(entry.styles || {})[0] || null
+                    };
+                    this.importTiles3D(entry.url, entry.name);
+                    this.objectMap[entry.name].userData = {
+                        ...this.objectMap[entry.name].userData,
+                        baseColor: entry.baseColor,
+                        tilesetStyle: null,
+                        idAttr: entry.idAttr,
+                        colorAttr: entry.colorAttr,
+                        alphaAttr: entry.alphaAttr,
+                        labelAttr: entry.labelAttr,
+                        infoAttrBlacklist: entry.infoAttrBlacklist
+                    };
+                    this.applySceneObjectState(entry.name, objectTree[entry.name], {}, objectTree);
+                    nodeIds.push(entry.name);
+                } else if (entry.type === "object3d") {
+                    objectTree[entry.name] = {
+                        objectId: entry.name,
+                        parent: parentId,
+                        title: entry.title ?? entry.name,
+                        visibility: entry.visibility ?? true,
+                        snap: entry.snap ?? true,
+                        opacity: 255
+                    };
+                    this.importObject3D(MiscUtils.resolveAssetsPath(entry.url), entry.name, false, {}, false, () => {
+                        this.applySceneObjectState(entry.name, objectTree[entry.name], {}, objectTree);
+                    });
+                    nodeIds.push(entry.name);
+                }
+            });
+            return nodeIds;
+        };
+        objectTree.null.children = buildObjectTree(objects, null);
+
+        this.setState(state => ({
+            sceneContext: {
+                ...state.sceneContext,
+                scene: this.instance,
+                map: this.map,
+                mapCrs: projection,
+                dtmUrl: demUrl,
+                dtmCrs: demCrs,
+                baseLayers: baseLayers,
+                colorLayers: colorLayers,
+                objectTree: objectTree
+            },
+            sceneId: uuidv4()
+        }));
+
+        // Inspector
+        if ((process.env.NODE_ENV !== "production" || this.props.forceAllowInspector) && ["1", "true"].includes((UrlParams.getParam("inspector") || "").toLowerCase())) {
+            const inspectorContainer = document.createElement("div");
+            inspectorContainer.className = 'map3d-inspector';
+            this.container.appendChild(inspectorContainer);
+            this.inspector = new Inspector(inspectorContainer, this.instance);
+        }
+
+        this.instance.addEventListener('update-start', this.instanceOnUpdateStart);
+        this.instance.addEventListener('update-end', this.instanceOnUpdateEnd);
+        this.instance.addEventListener('before-entity-update', this.instanceOnBeforeEntityUpdate);
+        this.instance.addEventListener('after-entity-update', this.instanceOnAfterEntityUpdate);
+    };
+    instanceOnUpdateStart = () => {
+        if (!this.state.sceneContext.scene?.view?.controls) {
+            return;
+        }
+        const camera = this.instance.view.camera;
+        const quality = this.state.sceneContext.settings.sceneQuality;
+        const isFirstPerson = this.state.sceneContext.scene.view.controls.isFirstPerson;
+        const maxDistance = isFirstPerson ? 200 + 20 * quality : 500 + quality * quality;
+        // Hide scene objects according to scene quality
+        Object.values(this.objectMap).forEach(object => {
+            if (object.userData.layertree && object.isObject3D && object.visible) {
+                object.children.forEach(child => {
+                    if (child.geometry) {
+                        if (!child.geometry.boundingBox) {
+                            child.geometry.computeBoundingBox();
+                        }
+                        const localCenter = child.geometry.boundingBox.getCenter(new Vector3());
+                        const worldCenter = localCenter.applyMatrix4(child.matrixWorld);
+                        const distance = camera.position.distanceTo(worldCenter);
+                        child.userData.__wasVisible = child.visible;
+                        if (distance > maxDistance) {
+                            child.visible = false;
+                        }
+                    }
+                });
+            }
+        });
+    };
+    instanceOnUpdateEnd = () => {
+        if (!this.state.sceneContext.scene?.view?.controls) {
+            return;
+        }
+        Object.values(this.objectMap).forEach(object => {
+            if (object.userData.layertree && object.isObject3D) {
+                object.children.forEach(child => {
+                    child.visible = child.userData.__wasVisible;
+                    delete child.userData.__wasVisible;
+                });
+            }
+        });
+    };
+    instanceOnBeforeEntityUpdate = ({entity}) => {
+        if (!this.state.sceneContext.scene?.view?.controls) {
+            return;
+        }
+        if (entity !== this.map) {
+            this.instance.view.camera.userData.__previousFar = this.instance.view.camera.far;
+            const quality = this.state.sceneContext.settings.sceneQuality;
+            const isFirstPerson = this.state.sceneContext.scene.view.controls.isFirstPerson;
+            this.instance.view.camera.far = isFirstPerson ? 200 + 20 * quality : 500 + quality * quality;
+            this.instance.view.camera.updateProjectionMatrix();
+        }
+    };
+    instanceOnAfterEntityUpdate = ({entity}) => {
+        if (!this.state.sceneContext.scene?.view?.camera) {
+            return;
+        }
+        if (entity !== this.map) {
+            this.instance.view.camera.far = this.instance.view.camera.userData.__previousFar;
+            delete this.instance.view.camera.userData.__previousFar;
+            this.instance.view.camera.updateProjectionMatrix();
+        }
+    };
+    disposeInstance = () => {
+        this.instance.removeEventListener('update-start', this.instanceOnUpdateStart);
+        this.instance.removeEventListener('update-end', this.instanceOnUpdateEnd);
+        this.instance.removeEventListener('before-entity-update', this.instanceOnBeforeEntityUpdate);
+        this.instance.removeEventListener('after-entity-update', this.instanceOnAfterEntityUpdate);
+        if (this.inspector) {
+            this.inspector.detach();
+        }
+        this.map.dispose({disposeLayers: true});
+        Object.values(this.objectMap).forEach(object => {
+            this.instance.remove(object);
+        });
+        this.instance.dispose();
+        this.inspector = null;
+        this.map = null;
+        this.objectMap = {};
+        this.sceneObjectGroup = null;
+        this.instance = null;
+        this.setState((state) => ({
+            sceneContext: {...state.sceneContext, ...Map3D.defaultSceneState}
+        }));
+        this.props.setCurrentTask(null);
+    };
+    onUnload = (key) => {
+        // Ensure scene has not already been disposed
+        if (this.state.sceneContext.sceneId === key) {
+            if (this.state.sceneContext.rebuildInstance) {
+                this.setupInstance();
+            } else {
+                this.disposeInstance();
+            }
+        }
+    };
+    setupControls = (instance) => {
+        this.setState(state => ({sceneContext: {
+            ...state.sceneContext,
+            setViewToExtent: instance?.setViewToExtent,
+            restoreView: instance?.restoreView
+
+        }}), this.props.onMapInitialized);
+    };
+    getTerrainHeightFromDTM = (scenePos) => {
+        let returnArray = true;
+        if (!Array.isArray(scenePos[0])) {
+            returnArray = false;
+            scenePos = [scenePos];
+        }
+        const dtmPos = scenePos.map(p => {
+            return CoordinatesUtils.reproject(p, this.state.sceneContext.mapCrs, this.state.sceneContext.dtmCrs.id);
+        });
+        const dtmExt = [Infinity, Infinity, -Infinity, -Infinity];
+        dtmPos.forEach(p => {
+            dtmExt[0] = Math.min(dtmExt[0], p[0]);
+            dtmExt[1] = Math.min(dtmExt[1], p[1]);
+            dtmExt[2] = Math.max(dtmExt[2], p[0]);
+            dtmExt[3] = Math.max(dtmExt[3], p[1]);
+        });
+        return new Promise((resolve) => {
+            if (!this.state.sceneContext.dtmUrl) {
+                resolve(returnArray ? scenePos.map(x => 0) : 0);
+                return;
+            }
+            fromUrl(this.state.sceneContext.dtmUrl).then(tiff => {
+
+                tiff.getImage().then(image => {
+                    const ModelPixelScale = image.fileDirectory.getValue('ModelPixelScale');
+                    const ModelTiepoint = image.fileDirectory.getValue('ModelTiepoint');
+
+                    // Extract scale and tiepoint values
+                    const [scaleX, scaleY] = [ModelPixelScale[0], ModelPixelScale[1]];
+                    const [tiepointX, tiepointY] = [ModelTiepoint[3], ModelTiepoint[4]]; // Tiepoint world coordinates
+
+                    // Calculate pixel indices (rounded to nearest integers)
+                    const minPixelX = Math.round((dtmExt[0] - tiepointX) / scaleX);
+                    const minPixelY = Math.round((tiepointY - dtmExt[3]) / scaleY); // Inverted Y-axis in image
+                    const maxPixelY = Math.round((tiepointY - dtmExt[1]) / scaleY) + 1; // Inverted Y-axis in image
+                    const maxPixelX = Math.round((dtmExt[2] - tiepointX) / scaleX) + 1;
+                    const width = maxPixelX - minPixelX;
+                    const height = maxPixelY - minPixelY;
+
+                    image.readRasters({ window: [minPixelX, minPixelY, maxPixelX, maxPixelY] }).then(raster => {
+                        if (!returnArray) {
+                            resolve(raster[0][0]);
+                        } else {
+                            const h = dtmPos.map(p => {
+                                const x = Math.round((p[0] - dtmExt[0]) / (dtmExt[2] - dtmExt[0]) * (width - 1));
+                                const y = Math.round((1 - (p[1] - dtmExt[1]) / (dtmExt[3] - dtmExt[1])) * (height - 1));
+                                return raster[0][x + y * width];
+                            });
+                            resolve(h);
+                        }
+                    });
+                });
+            });
+        });
+    };
+    getTerrainHeightFromMap = (scenePos) => {
+        const crs = CoordinateSystem.get(this.state.sceneContext.mapCrs);
+        const coordinates = new Coordinates(crs, scenePos[0], scenePos[1], 0);
+        const elevationResult = this.state.sceneContext.map.getElevation({coordinates});
+        // const raycaster = new Raycaster(new Vector3(scenePos[0], scenePos[1], 10000));
+        // const terrInter = raycaster.intersectObjects([this.map.object3d]).filter(result => result.object.children.length === 0)[0];
+        elevationResult.samples.sort((a, b) => a.resolution - b.resolution);
+        return elevationResult.samples[0]?.elevation;
+    };
+    getSceneIntersection = (x, y, objects = true) => {
+        const raycaster = new Raycaster();
+        const camera = this.instance.view.camera;
+        raycaster.setFromCamera(new Vector2(x, y), camera);
+        // Query object intersection
+        const objInter = objects ? raycaster.intersectObjects(this.state.sceneContext.collisionObjects, true)[0] : undefined;
+        // Query highest resolution terrain tile (i.e. tile with no children)
+        const terrInter = raycaster.intersectObjects([this.map.object3d]).filter(result => result.object.children.length === 0)[0];
+        // Return closest result
+        if (objInter && terrInter) {
+            return objInter.distance < terrInter.distance ? objInter : terrInter;
+        }
+        return objInter ?? terrInter;
+    };
+    getSetting = (key) => {
+        return this.state.sceneContext.settings[key];
+    };
+    setSetting = (key, value) => {
+        this.setState(state => ({
+            sceneContext: {
+                ...state.sceneContext, settings: {
+                    ...state.sceneContext.settings,
+                    [key]: value
+                }
+            }
+        }));
+    };
+    redrawScene = (ev) => {
+        const width = ev.target.innerWidth;
+        const height = ev.target.innerHeight;
+        this.instance.renderer.setSize(width, height);
+        this.instance.view.camera.aspect = width / height;
+        this.instance.view.camera.updateProjectionMatrix();
+        this.instance.renderer.render(this.instance.scene, this.instance.view.camera);
+    };
+    setViewToExtent = (bounds, rotation) => {
+        this.state.sceneContext.setViewToExtent(bounds, rotation);
+    };
+    store3dState = () => {
+        const promises = Object.values(this.state.sceneContext.objectTree).map(entry => {
+            return new Promise(resolve => {
+                const object = this.state.sceneContext.getSceneObject(entry.objectId);
+                if (entry.drawGroup) {
+                    const exporter = new GLTFExporter();
+                    exporter.parse(object, (result) => {
+                        resolve({id: entry.objectId, options: entry, data: result});
+                    });
+                } else if (entry.imported && object.tiles) {
+                    const container = object.tiles.group.parent;
+                    const tileset = {matrix: container.matrix.elements, label: container.userData.label, url: object.tiles.rootURL};
+                    resolve({id: entry.objectId, options: entry, tileset: tileset});
+                } else {
+                    resolve({id: entry.objectId, options: entry});
+                }
+            });
+        }).filter(Boolean);
+        return new Promise(resolve => {
+            Promise.all(promises).then(objects => {
+                const camera = this.state.sceneContext.scene.view.camera.position;
+                const target = this.state.sceneContext.scene.view.controls.target;
+                const layers = Object.entries(this.state.sceneContext.colorLayers).map(([layerId, options]) => ({
+                    id: layerId, options: {
+                        visibility: options.visibility,
+                        opacity: options.opacity,
+                        extrusionHeight: options.extrusionHeight,
+                        expanded: options.expanded
+                    }
+                }));
+                resolve({
+                    state: {
+                        objects: objects,
+                        colorLayers: layers,
+                        baseLayer: this.state.sceneContext.baseLayers.find(layer => layer.visibility === true)?.name || "",
+                        personHeight: this.state.sceneContext.scene.view.controls.personHeight ?? 0,
+                        camera: [camera.x, camera.y, camera.z],
+                        target: [target.x, target.y, target.z]
+                    }
+                });
+            });
+        });
+    };
+    restore3dState = (data) => {
+        if (isEmpty(data)) {
+            return;
+        }
+        (data.objects || []).forEach(item => {
+            if (item.data) {
+                // Don't use importObject3D as we don't need to transform from Y-up to Z-up
+                const loader = new GLTFLoader();
+                loader.parse(item.data, ConfigUtils.getAssetsPath(), (gltf) => {
+                    gltf.scene.traverse(c => {
+                        if (c.isMesh) {
+                            c.castShadow = true;
+                            c.receiveShadow = true;
+                        }
+                        updateObjectLabel(c, this.state.sceneContext);
+                    });
+                    this.addSceneObject(item.id, gltf.scene, true, item.options);
+                });
+            } else if (item.tileset) {
+                this.importTiles3D(item.tileset.url, item.id, true, item.options, false, new Matrix4().fromArray(item.tileset.matrix), item.tileset.label);
+            } else if (item.id in this.state.sceneContext.objectTree) {
+                this.state.sceneContext.updateSceneObject(item.id, item.options);
+            }
+        });
+        (data.colorLayers || []).forEach(item => {
+            if (item.id in this.state.sceneContext.colorLayers) {
+                this.state.sceneContext.updateColorLayer(item.id, item.options);
+            }
+        });
+        this.state.sceneContext.restoreView(data);
+        if ((data.baseLayer ?? null) !== null) {
+            const bl3d = data.baseLayer ?? "";
+
+            this.setBaseLayer({name: bl3d}, bl3d !== "null");
+        }
+        this.state.sceneContext.scene.notifyChange();
+    };
+}
+
+export default connect((state) => ({
+    theme: state.theme.current,
+    themes: state.theme.themes,
+    layers: state.layers.flat
+}), {
+    setCurrentTask: setCurrentTask
+})(Map3D);

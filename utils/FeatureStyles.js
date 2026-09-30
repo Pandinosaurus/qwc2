@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,11 +7,21 @@
  */
 
 import ol from 'openlayers';
+
+import minus from '../icons/minus.svg';
+import plus from '../icons/plus.svg';
 import ConfigUtils from './ConfigUtils';
-import ResourceRegistry from './ResourceRegistry';
-import markerIcon from './img/marker-icon.png';
 import arrowhead from './img/arrowhead.svg';
+import markerIcon from './img/marker-icon.png';
 import measurehead from './img/measurehead.svg';
+import MiscUtils from './MiscUtils';
+import ResourceRegistry from './ResourceRegistry';
+
+ResourceRegistry.addResource('arrowhead', arrowhead);
+ResourceRegistry.addResource('measurehead', measurehead);
+ResourceRegistry.addResource('marker', markerIcon);
+ResourceRegistry.addResource('minus', minus);
+ResourceRegistry.addResource('plus', plus);
 
 const DEFAULT_FEATURE_STYLE = {
     strokeColor: [0, 0, 255, 1],
@@ -22,6 +32,14 @@ const DEFAULT_FEATURE_STYLE = {
     textFill: "black",
     textStroke: "white",
     textFont: "11pt sans-serif"
+};
+
+const DEFAULT_HIGHLIGHT_STYLE = {
+    ...DEFAULT_FEATURE_STYLE,
+    strokeColor: [255, 255, 0, 1],
+    strokeWidth: 2,
+    strokeDash: [],
+    fillColor: [255, 255, 0, 0.25]
 };
 
 const DEFAULT_MARKER_STYLE = {
@@ -36,7 +54,7 @@ const DEFAULT_MARKER_STYLE = {
 };
 
 const DEFAULT_INTERACTION_STYLE = {
-    fillColor: [255, 0, 0, 0.5],
+    fillColor: [255, 0, 0, 0.33],
     strokeColor: "red",
     strokeWidth: 1.5,
     vertexFillColor: "white",
@@ -53,9 +71,16 @@ const DEFAULT_INTERACTION_STYLE = {
     measureVertexStrokeColor: "red",
     measureVertexStrokeWidth: 2,
     measurePointRadius: 6,
+    measureTextFill: "black",
+    measureTextStroke: "white",
     sketchPointFillColor: "#0099FF",
     sketchPointStrokeColor: "white",
-    sketchPointRadius: 6
+    sketchPointRadius: 6,
+    printStrokeColor: '#3399CC',
+    printStrokeWidth: 3,
+    printVertexColor: '#FFFFFF',
+    printVertexRadius: 6,
+    printBackgroundColor: [0, 0, 0, 0.5]
 };
 
 export const END_MARKERS = {
@@ -64,12 +89,70 @@ export const END_MARKERS = {
     LINE: {src: measurehead, anchor: [0.05, 0.5], baserotation: 0}
 };
 
-export function computeFeatureStyle(feature) {
-    return {...DEFAULT_FEATURE_STYLE, ...ConfigUtils.getConfigProp("defaultFeatureStyle"), ...feature.styleOptions};
+// Point symbols, per feature as styleOptions.pointShape. Keys must stay valid SLD WellKnownNames:
+// VectorLayerUtils.createSld emits them into the print SLD. radiusFactor keeps shapes the same width.
+export const POINT_SHAPES = {
+    circle: {},
+    square: {points: 4, angle: Math.PI / 4, radiusFactor: Math.SQRT2},
+    star: {points: 5, angle: 0, radiusFactor: 1 / Math.cos(Math.PI / 10), radius2Factor: 0.38},
+    triangle: {points: 3, angle: 0, radiusFactor: 2 / Math.sqrt(3)}
+};
+
+export function defaultFeatureStyle() {
+    return {...DEFAULT_FEATURE_STYLE, ...ConfigUtils.getConfigProp("defaultFeatureStyle")};
 }
 
+export function defaultHighlightStyle() {
+    return {...DEFAULT_HIGHLIGHT_STYLE, ...ConfigUtils.getConfigProp("defaultHighlightStyle")};
+}
+
+export function defaultInteractionStyle() {
+    return {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle")};
+}
+
+export function computeFeatureStyle(layer, feature) {
+    return {...defaultFeatureStyle(), ...layer.styleOptions, ...feature.styleOptions};
+}
+
+export function computeMeasureFeatureStyle(markerOpts) {
+    const opts = {...defaultInteractionStyle(), ...markerOpts};
+    return {
+        circleRadius: opts.measurePointRadius,
+        strokeColor: opts.measureStrokeColor,
+        strokeWidth: opts.measureStrokeWidth,
+        fillColor: opts.measureFillColor,
+        headmarker: opts.headmarker,
+        tailmarker: opts.tailmarker,
+        markerscale: opts.markerscale,
+        textFill: opts.measureTextFill,
+        textStroke: opts.measureTextStroke,
+        strokeDash: []
+    };
+}
+
+const pointImage = (opts) => {
+    if (!(opts.circleRadius > 0)) {
+        return null;
+    }
+    const fill = new ol.style.Fill({ color: opts.fillColor });
+    const stroke = new ol.style.Stroke({color: opts.strokeColor, width: opts.strokeWidth});
+    const params = POINT_SHAPES[opts.pointShape];
+    if (!params?.points) {
+        return new ol.style.Circle({radius: opts.circleRadius, fill: fill, stroke: stroke});
+    }
+    const radius = opts.circleRadius * params.radiusFactor;
+    return new ol.style.RegularShape({
+        fill: fill,
+        stroke: stroke,
+        points: params.points,
+        angle: params.angle,
+        radius: radius,
+        radius2: params.radius2Factor ? radius * params.radius2Factor : undefined
+    });
+};
+
 const defaultStyle = (feature, options) => {
-    const opts = {...DEFAULT_FEATURE_STYLE, ...ConfigUtils.getConfigProp("defaultFeatureStyle"), ...options};
+    const opts = {...defaultFeatureStyle(), ...options};
     const styles = [];
     styles.push(
         new ol.style.Style({
@@ -79,13 +162,10 @@ const defaultStyle = (feature, options) => {
             stroke: new ol.style.Stroke({
                 color: opts.strokeColor,
                 width: opts.strokeWidth,
-                lineDash: opts.strokeDash
+                lineDash: opts.strokeDash,
+                lineCap: 'butt'
             }),
-            image: opts.circleRadius > 0 ? new ol.style.Circle({
-                radius: opts.circleRadius,
-                fill: new ol.style.Fill({ color: opts.fillColor }),
-                stroke: new ol.style.Stroke({color: opts.strokeColor, width: opts.strokeWidth})
-            }) : null
+            image: pointImage(opts)
         })
     );
     if (feature.getProperties().label) {
@@ -138,6 +218,27 @@ const defaultStyle = (feature, options) => {
             }));
         }
     }
+    if (feature.getProperties().end_label) {
+        const coo = feature.getGeometry().getCoordinates();
+        let point = null;
+        if (feature.getGeometry().getType() === "LineString") {
+            point = coo[coo.length - 1];
+        } else if (feature.getGeometry().getType() === "Polygon") {
+            point = coo[0].reduce((min, p) => p[1] < min[1] ? p : min, [Infinity, Infinity]);
+        }
+        if (point) {
+            styles.push(new ol.style.Style({
+                geometry: new ol.geom.Point(point),
+                text: new ol.style.Text({
+                    font: opts.textFont || '11pt sans-serif',
+                    text: feature.getProperties().end_label,
+                    fill: new ol.style.Fill({color: opts.textFill}),
+                    stroke: new ol.style.Stroke({color: opts.textStroke, width: 3}),
+                    offsetY: 20
+                })
+            }));
+        }
+    }
     if (feature.getGeometry().getType() === "LineString" && opts.headmarker in END_MARKERS) {
         const p1 = feature.getGeometry().getCoordinates()[0];
         const p2 = feature.getGeometry().getCoordinates()[1];
@@ -150,7 +251,7 @@ const defaultStyle = (feature, options) => {
                 anchorYUnits: 'fraction',
                 color: opts.strokeColor,
                 rotation: END_MARKERS[opts.headmarker].baserotation / 180 * Math.PI + rotation,
-                scale: 0.125 * (1 + opts.strokeWidth) // Also update in VectorLayerUtils.generateMarkerGeometry
+                scale: 0.125 * (1 + opts.strokeWidth) * (opts.markerscale ?? 1) // Also update in VectorLayerUtils.generateMarkerGeometry
             })
         }));
     }
@@ -167,7 +268,7 @@ const defaultStyle = (feature, options) => {
                 anchorYUnits: 'fraction',
                 color: opts.strokeColor,
                 rotation: END_MARKERS[opts.tailmarker].baserotation / 180 * Math.PI + rotation,
-                scale: 0.125 * (1 + opts.strokeWidth) // Also update in VectorLayerUtils.generateMarkerGeometry
+                scale: 0.125 * (1 + opts.strokeWidth) * (opts.markerscale ?? 1) // Also update in VectorLayerUtils.generateMarkerGeometry
             })
         }));
     }
@@ -200,23 +301,23 @@ export default {
             })
         ];
     },
-    interaction: (options, isSnap) => {
-        const opts = {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle"), ...options};
-        let fillColor = opts.fillColor;
-        let strokeColor = opts.strokeColor;
-        let strokeWidth = opts.strokeWidth;
-        if (isSnap) {
-            fillColor = opts.snapFillColor;
-            strokeColor = opts.snapStrokeColor;
-            strokeWidth = opts.snapStrokeWidth;
-        }
-        return new ol.style.Style({
-            fill: new ol.style.Fill({ color: fillColor }),
-            stroke: new ol.style.Stroke({ color: strokeColor, width: strokeWidth})
-        });
+    interaction: (feature, options, isSnap) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        const styleOptions = isSnap ? {
+            strokeColor: opts.snapStrokeColor,
+            strokeWidth: opts.snapStrokeWidth,
+            fillColor: opts.snapFillColor
+        } : {
+            strokeColor: opts.strokeColor,
+            strokeWidth: opts.strokeWidth,
+            fillColor: opts.fillColor
+        };
+        styleOptions.strokeDash = [];
+        styleOptions.circleRadius = 0;
+        return defaultStyle(feature, styleOptions);
     },
     interactionVertex: (options, isSnap) => {
-        const opts = {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle"), ...options};
+        const opts = {...defaultInteractionStyle(), ...options};
         let strokeWidth = opts.strokeWidth;
         let vertexFill = opts.vertexFillColor;
         let vertexStroke = opts.vertexStrokeColor;
@@ -226,7 +327,13 @@ export default {
             vertexStroke = opts.snapVertexStrokeColor;
         }
         return new ol.style.Style({
-            image: new ol.style.RegularShape({
+            image: options.img ? new ol.style.Icon({
+                src: ResourceRegistry.getResource(options.img),
+                rotation: options.rotation,
+                anchor: [0.5, 1],
+                imgSize: options.size,
+                rotateWithView: true
+            }) : new ol.style.RegularShape({
                 fill: new ol.style.Fill({ color: vertexFill }),
                 stroke: new ol.style.Stroke({ color: vertexStroke, width: strokeWidth }),
                 points: 4,
@@ -236,18 +343,8 @@ export default {
             geometry: opts.geometryFunction
         });
     },
-    measureInteraction: (feature, options) => {
-        const opts = {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle"), ...options};
-        const styleOptions = {
-            strokeColor: opts.measureStrokeColor,
-            strokeWidth: opts.measureStrokeWidth,
-            fillColor: opts.measureFillColor,
-            strokeDash: []
-        };
-        return defaultStyle(feature, styleOptions);
-    },
     measureInteractionVertex: (options) => {
-        const opts = {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle"), ...options};
+        const opts = {...defaultInteractionStyle(), ...options};
         return new ol.style.Style({
             image: new ol.style.Circle({
                 radius: opts.measurePointRadius,
@@ -258,7 +355,7 @@ export default {
         });
     },
     sketchInteraction: (options) => {
-        const opts = {...DEFAULT_INTERACTION_STYLE, ...ConfigUtils.getConfigProp("defaultInteractionStyle"), ...options};
+        const opts = {...defaultInteractionStyle(), ...options};
         return new ol.style.Style({
             image: new ol.style.Circle({
                 fill: new ol.style.Fill({color: opts.sketchPointFillColor}),
@@ -267,12 +364,88 @@ export default {
             })
         });
     },
+    printInteraction: (options) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        return new ol.style.Style({
+            geometry: opts.geometryFunction,
+            fill: new ol.style.Fill({
+                color: [0, 0, 0, 0]
+            }),
+            stroke: new ol.style.Stroke({
+                color: opts.printStrokeColor,
+                width: opts.printStrokeWidth
+            })
+        });
+    },
+    printInteractionVertex: (options) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        return new ol.style.Style({
+            geometry: opts.geometryFunction,
+            image: new ol.style.Circle({
+                radius: opts.printVertexRadius,
+                fill: new ol.style.Fill({
+                    color: opts.fill ? opts.printStrokeColor : opts.printVertexColor
+                }),
+                stroke: new ol.style.Stroke({
+                    color: opts.printStrokeColor,
+                    width: opts.printStrokeWidth
+                })
+            })
+        });
+    },
+    printInteractionBackground: (options) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        return new ol.style.Style({
+            geometry: opts.geometryFunction,
+            fill: new ol.style.Fill({
+                color: opts.printBackgroundColor
+            })
+        });
+    },
+    printInteractionSeries: (options) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        return new ol.style.Style({
+            geometry: opts.geometryFunction,
+            stroke: new ol.style.Stroke({
+                color: opts.printStrokeColor,
+                width: opts.printStrokeWidth
+            })
+        });
+    },
+    printInteractionSeriesIcon: (options) => {
+        const opts = {...defaultInteractionStyle(), ...options};
+        return [
+            new ol.style.Style({
+                geometry: opts.geometryFunction,
+                image: new ol.style.Circle({
+                    radius: 20 * opts.radius,
+                    fill: new ol.style.Fill({
+                        color: opts.printVertexColor
+                    }),
+                    stroke: new ol.style.Stroke({
+                        color: opts.printStrokeColor,
+                        width: opts.printStrokeWidth
+                    })
+                })
+            }),
+            new ol.style.Style({
+                geometry: opts.geometryFunction,
+                image: new ol.style.Icon({
+                    src: ResourceRegistry.getResource(opts.img),
+                    opacity: 0.5,
+                    rotation: opts.rotation,
+                    scale: opts.radius,
+                    rotateWithView: true
+                })
+            })
+        ];
+    },
     image: (feature, options) => {
         return new ol.style.Style({
             image: new ol.style.Icon({
-                img: ResourceRegistry.getResource(options.img),
+                src: ResourceRegistry.getResource(options.img),
                 rotation: options.rotation,
-                anchor: [0.5, 1],
+                anchor: options.anchor,
                 imgSize: options.size,
                 rotateWithView: true
             })
@@ -284,9 +457,39 @@ export default {
                 text: new ol.style.Text({
                     font: '10pt sans-serif',
                     text: feature.getProperties().label || "",
+                    rotation: feature.getProperties().rotation || 0,
                     scale: options.strokeWidth,
                     fill: new ol.style.Fill({color: options.fillColor}),
                     stroke: new ol.style.Stroke({color: options.strokeColor, width: 2})
+                })
+            })
+        ];
+    },
+    textlabel: (feature, options) => {
+        return [
+            new ol.style.Style({
+                text: new ol.style.Text({
+                    font: '10pt sans-serif',
+                    padding: [3, 5, 3, 5],
+                    text: feature.getProperties().label || "",
+                    rotation: feature.getProperties().rotation || 0,
+                    scale: options.strokeWidth,
+                    fill: new ol.style.Fill({color: options.strokeColor}),
+                    stroke: new ol.style.Stroke({color: MiscUtils.isBrightColor(options.strokeColor) ? '#333' : '#FFF', width: 2}),
+                    backgroundFill: new ol.style.Fill({
+                        color: options.fillColor
+                    }),
+                    backgroundStroke: new ol.style.Stroke({
+                        color: options.strokeColor,
+                        width: 2
+                    })
+                })
+            }),
+            new ol.style.Style({
+                geometry: new ol.geom.LineString([feature.getGeometry().getCoordinates(), options.anchor]),
+                stroke: new ol.style.Stroke({
+                    color: options.strokeColor,
+                    width: 2
                 })
             })
         ];

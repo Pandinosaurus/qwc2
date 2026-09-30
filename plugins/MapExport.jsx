@@ -1,41 +1,51 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import axios from 'axios';
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import {TextEncoder, TextDecoder} from "@kayahr/text-encoding";
+import axios from 'axios';
+import dayjs from 'dayjs';
 import FileSaver from 'file-saver';
 import isEmpty from 'lodash.isempty';
-import formDataEntries from 'formdata-json';
+import PropTypes from 'prop-types';
+
 import {LayerRole} from '../actions/layers';
-import {setCurrentTask} from '../actions/task';
+import {setSnappingConfig} from '../actions/map';
 import Icon from '../components/Icon';
-import InputContainer from '../components/InputContainer';
-import PrintFrame from '../components/PrintFrame';
+import PrintSelection from '../components/PrintSelection';
 import SideBar from '../components/SideBar';
-import Spinner from '../components/Spinner';
+import ComboBox from '../components/widgets/ComboBox';
+import NumberInput from '../components/widgets/NumberInput';
+import Spinner from '../components/widgets/Spinner';
 import ConfigUtils from '../utils/ConfigUtils';
 import CoordinatesUtils from '../utils/CoordinatesUtils';
+import {decodeDxf, detectDxfEncoding, explodeDxf, implodeDxf, mergeDxf, setDwgCodepage} from '../utils/DxfUtils';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import MapUtils from '../utils/MapUtils';
-import MiscUtils from '../utils/MiscUtils';
 import VectorLayerUtils from '../utils/VectorLayerUtils';
+
 import './style/MapExport.css';
+import "@kayahr/text-encoding/encodings/windows-1252";
 
 
 /**
  * Allows exporting a selected portion of the map to a variety of formats.
+ *
+ * Unless a fixed `pageSizes` entry is selected, the export extent is drawn freely on the map and
+ * the corner handles resize it in both directions independently. Hold `Shift` while dragging a
+ * corner to preserve the aspect ratio of the selection.
  */
 class MapExport extends React.Component {
     static propTypes = {
-        /** Whitelist of allowed export format mimetypes. If empty, supported formats are listed. */
+        /** Whitelist of allowed export format mimetypes. If empty, supported formats are listed. Formats are sorted according to this list, and the first entry becomes the default format. Supported mimetypes are: `image/jpeg`, `image/png`, `image/png; mode=16bit`, `image/png; mode=8bit`, `image/png; mode=1bit`, `image/geotiff`, `image/tiff`, `application/dxf`, `application/pdf`. */
         allowedFormats: PropTypes.arrayOf(PropTypes.string),
         /** List of scales at which to export the map. If empty, scale can be freely specified. If `false`, the map can only be exported at the current scale. */
         allowedScales: PropTypes.oneOfType([PropTypes.arrayOf(PropTypes.number), PropTypes.bool]),
@@ -47,19 +57,30 @@ class MapExport extends React.Component {
         dpis: PropTypes.arrayOf(PropTypes.number),
         /** Whether to include external layers in the image. Requires QGIS Server 3.x! */
         exportExternalLayers: PropTypes.bool,
-        /** Custom export configuration per format.
+        /** Template for the name of the generated files when downloading. Can contain the placeholders `{username}`, `{tenant}`, `{theme}`, `{themeTitle}`, `{timestamp}`. */
+        fileNameTemplate: PropTypes.string,
+        filter: PropTypes.object,
+        /** Formats to force as available even if the map capabilities report otherwise. Useful if a serviceUrl is defined in a format configuration. */
+        forceAvailableFormats: PropTypes.array,
+        /** Custom format export configuration. Specify a format mime-type (i.e. `application/dxf`) as key, and an array of one or more configurations as value.
          *  If more than one configuration per format is provided, a selection combo will be displayed.
+         *  `labelMsgId` is a translation string message id for the combo label. If not defined, `name` will be displayed.
          *  `extraQuery` will be appended to the query string (replacing any existing parameters).
          *  `formatOptions` will be passed as FORMAT_OPTIONS.
-         *  `baseLayer` will be appended to the LAYERS instead of the background layer. */
-        formatConfiguration: PropTypes.shape({
-            format: PropTypes.arrayOf(PropTypes.shape({
+         *  `baseLayer` will be appended to the LAYERS instead of the background layer.
+         *  `projections` is a list of export projections. If empty, the map projection is automatically used.
+         *  `serviceUrl` is the address of a custom service to use instead of the layer OWS service url. */
+        formatConfiguration: PropTypes.objectOf(
+            PropTypes.arrayOf(PropTypes.shape({
                 name: PropTypes.string,
+                labelMsgId: PropTypes.string,
                 extraQuery: PropTypes.string,
                 formatOptions: PropTypes.string,
-                baseLayer: PropTypes.string
+                baseLayer: PropTypes.string,
+                projections: PropTypes.array,
+                serviceUrl: PropTypes.string
             }))
-        }),
+        ),
         layers: PropTypes.array,
         map: PropTypes.object,
         /** List of image sizes to offer, in addition to the free-hand selection. The width and height are in millimeters. */
@@ -68,19 +89,18 @@ class MapExport extends React.Component {
             width: PropTypes.number,
             height: PropTypes.number
         })),
-        setCurrentTask: PropTypes.func,
+        setIdentifyEnabled: PropTypes.func,
+        setSnappingConfig: PropTypes.func,
         /** The side of the application on which to display the sidebar. */
         side: PropTypes.string,
         theme: PropTypes.object
     };
     static defaultProps = {
-        defaultScaleFactor: 0.5,
+        defaultScaleFactor: 1,
         exportExternalLayers: true,
+        fileNameTemplate: '{theme}_{timestamp}',
         side: 'right',
-        pageSizes: [
-            {name: '15 x 15 cm', width: 150, height: 150},
-            {name: '30 x 30 cm', width: 300, height: 300}
-        ]
+        pageSizes: []
     };
     constructor(props) {
         super(props);
@@ -88,57 +108,55 @@ class MapExport extends React.Component {
         this.state.dpi = (props.dpis || [])[0] || 96;
     }
     state = {
-        extent: '',
-        width: 0,
-        height: 0,
+        extents: [],
         exporting: false,
         availableFormats: [],
         selectedFormat: null,
-        scale: '',
+        selectedFormatConfiguration: '',
+        exportProjection: null,
+        scale: null,
         pageSize: null,
         dpi: 96
     };
     componentDidUpdate(prevProps, prevState) {
-        if (
-            this.props.map.center !== prevProps.map.center ||
-            this.props.map.bbox !== prevProps.map.bbox ||
-            this.state.pageSize !== prevState.pageSize ||
-            this.state.scale !== prevState.scale ||
-            this.state.dpi !== prevState.dpi
-        ) {
-            if (this.state.pageSize !== null) {
-                this.setState((state) => {
-                    const scale = this.getExportScale(state);
-                    const center = this.props.map.center;
-                    const mapCrs = this.props.map.projection;
-                    const pageSize = this.props.pageSizes[state.pageSize];
-                    const widthm = scale * pageSize.width / 1000;
-                    const heightm = scale * pageSize.height / 1000;
-                    const {width, height} = MapUtils.transformExtent(mapCrs, center, widthm, heightm);
-                    let extent = [center[0] - 0.5 * width, center[1] - 0.5 * height, center[0] + 0.5 * width, center[1] + 0.5 * height];
-                    extent = (CoordinatesUtils.getAxisOrder(mapCrs).substr(0, 2) === 'ne' && this.props.theme.version === '1.3.0') ?
-                        extent[1] + "," + extent[0] + "," + extent[3] + "," + extent[2] :
-                        extent.join(',');
-                    return {
-                        width: Math.round(pageSize.width / 1000 * 39.3701 * state.dpi),
-                        height: Math.round(pageSize.height / 1000 * 39.3701 * state.dpi),
-                        extent: extent
-                    };
-                });
-            } else if (prevState.pageSize !== null) {
-                this.setState({width: '', height: '', extent: ''});
-            }
+        if (this.state.pageSize === null && prevState.pageSize !== null) {
+            this.setState({extents: []});
         }
     }
-    formatChanged = (ev) => {
-        this.setState({selectedFormat: ev.target.value});
+    changeFormat = (ev) => {
+        const selectedFormat = ev.target.value;
+        const formatConfigurations = this.props.formatConfiguration?.[selectedFormat.split(";")[0]] || [];
+        this.setState({
+            selectedFormat: selectedFormat,
+            selectedFormatConfiguration: formatConfigurations[0]?.name,
+            exportProjection: this.getExportProjection(formatConfigurations[0]?.projections)
+        });
     };
-    dpiChanged = (ev) => {
-        this.setState({dpi: parseInt(ev.target.value, 10)});
+    setSelectedFormatConfiguration = (ev) => {
+        const selectedFormatConfiguration = ev.target.value;
+        const formatConfigurations = this.props.formatConfiguration?.[this.state.selectedFormat.split(";")[0]] || [];
+        const formatConfiguration = formatConfigurations.find(entry => entry.name === selectedFormatConfiguration);
+        this.setState({
+            selectedFormatConfiguration: selectedFormatConfiguration,
+            exportProjection: this.getExportProjection(formatConfiguration.projections)
+        });
+    };
+    getExportProjection = (projections) => {
+        if (isEmpty(projections)) {
+            return this.props.map.projection;
+        } else {
+            return projections.indexOf(this.props.map.projection) !== -1 ? this.props.map.projection : projections[0];
+        }
+    };
+    changeScale = (value) => {
+        this.setState({scale: Math.max(1, parseInt(value, 10) || 0)});
+    };
+    changeResolution = (ev) => {
+        this.setState({dpi: parseInt(ev.target.value, 10) || 0});
     };
     renderBody = () => {
         if (!this.props.theme || !this.state.selectedFormat) {
-            return null;
+            return (<div className="mapexport-body" role="body">{LocaleUtils.tr("print.notheme")}</div>);
         }
         const formatMap = {
             "image/jpeg": "JPEG",
@@ -151,64 +169,53 @@ class MapExport extends React.Component {
             "application/dxf": "DXF",
             "application/pdf": "GeoPDF"
         };
-        const formatConfiguration = this.props.formatConfiguration?.[this.state.selectedFormat.split(";")[0]] || [];
+        const formatConfigurations = this.props.formatConfiguration?.[this.state.selectedFormat.split(";")[0]] || [];
+        const formatConfiguration = formatConfigurations.find(entry => entry.name === this.state.selectedFormatConfiguration);
 
         let scaleChooser = null;
         if (!isEmpty(this.props.allowedScales)) {
             scaleChooser = (
-                <select onChange={ev => this.setState({scale: ev.target.value})} role="input" value={this.state.scale}>
-                    {this.props.allowedScales.map(scale => (<option key={scale} value={scale}>{scale}</option>))}
-                </select>);
+                <ComboBox onChange={this.changeScale} value={this.state.scale || ""}>
+                    {this.props.allowedScales.map(scale => (<div key={scale} value={scale}>1 : {scale}</div>))}
+                </ComboBox>
+            );
         } else if (this.props.allowedScales !== false) {
             scaleChooser = (
-                <input min="1" onChange={ev => this.setState({scale: ev.target.value})} role="input" type="number" value={this.state.scale} />
+                <NumberInput min={1} mobile onChange={this.changeScale} prefix="1 : " value={this.state.scale || null} />
             );
         }
-        const filename = this.props.theme.name + "." + this.state.selectedFormat.split(";")[0].split("/").pop();
-        const action = this.props.theme.url;
-        const exportExternalLayers = this.state.selectedFormat !== "application/dxf" && this.props.exportExternalLayers && ConfigUtils.getConfigProp("qgisServerVersion") >= 3;
-
-        const mapScale = MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom);
-        let scaleFactor = 1;
-        if (this.state.pageSize === null && this.props.allowedScales !== false) {
-            scaleFactor = mapScale / this.state.scale;
-        }
-        const selectedFormatConfiguration = formatConfiguration.find(entry => entry.name === this.state.selectedFormatConfiguration) || {};
-        const exportParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, this.state.scale, this.props.map.projection, exportExternalLayers, !!selectedFormatConfiguration.baseLayer);
-        const highlightParams = VectorLayerUtils.createPrintHighlighParams(this.props.layers, this.props.map.projection, this.state.scale, this.state.dpi);
-
         return (
             <div className="mapexport-body">
-                <form action={action} method="POST" onSubmit={this.export} ref={el => { this.form = el; }}>
+                <form action="#" method="POST" onSubmit={this.export} ref={el => { this.form = el; }}>
                     <table className="options-table">
                         <tbody>
                             <tr>
-                                <td>{LocaleUtils.tr("mapexport.format")}</td>
+                                <td>{LocaleUtils.tr("common.format")}</td>
                                 <td>
-                                    <select name="FORMAT" onChange={this.formatChanged} value={this.state.selectedFormat}>
+                                    <select onChange={this.changeFormat} value={this.state.selectedFormat}>
                                         {this.state.availableFormats.map(format => {
                                             return (<option key={format} value={format}>{formatMap[format] || format}</option>);
                                         })}
                                     </select>
                                 </td>
                             </tr>
-                            {formatConfiguration.length > 1 ? (
+                            {formatConfigurations.length > 1 ? (
                                 <tr>
                                     <td>{LocaleUtils.tr("mapexport.configuration")}</td>
                                     <td>
-                                        <select onChange={(ev) => this.setState({selectedFormatConfiguration: ev.target.value})} value={this.state.selectedFormatConfiguration}>
-                                            {formatConfiguration.map(config => {
-                                                return (<option key={config.name} value={config.name}>{config.name}</option>);
+                                        <select onChange={this.setSelectedFormatConfiguration} value={this.state.selectedFormatConfiguration}>
+                                            {formatConfigurations.map(config => {
+                                                return (<option key={config.name} value={config.name}>{config.labelMsgId ? LocaleUtils.tr(config.labelMsgId) : config.name}</option>);
                                             })}
                                         </select>
                                     </td>
                                 </tr>
                             ) : null}
-                            {this.props.pageSizes ? (
+                            {!isEmpty(this.props.pageSizes) ? (
                                 <tr>
                                     <td>{LocaleUtils.tr("mapexport.size")}</td>
                                     <td>
-                                        <select onChange={(ev) => this.setState({pageSize: ev.target.value || null})} value={this.state.pageSize ?? ""}>
+                                        <select onChange={(ev) => this.setState({pageSize: ev.target.value || null})} value={this.state.pageSize || ""}>
                                             <option value="">{LocaleUtils.tr("mapexport.usersize")}</option>
                                             {this.props.pageSizes.map((entry, idx) => (
                                                 <option key={"size_" + idx} value={idx}>{entry.name}</option>
@@ -221,18 +228,15 @@ class MapExport extends React.Component {
                                 <tr>
                                     <td>{LocaleUtils.tr("mapexport.scale")}</td>
                                     <td>
-                                        <InputContainer>
-                                            <span role="prefix">1&nbsp;:&nbsp;</span>
-                                            {scaleChooser}
-                                        </InputContainer>
+                                        {scaleChooser}
                                     </td>
                                 </tr>
                             ) : null}
-                            {this.props.dpis ? (
+                            {this.props.dpis && this.state.selectedFormat !== "application/dxf" ? (
                                 <tr>
-                                    <td>{LocaleUtils.tr("mapexport.resolution")}</td>
+                                    <td>{LocaleUtils.tr("common.resolution")}</td>
                                     <td>
-                                        <select name="DPI" onChange={this.dpiChanged} value={this.state.dpi}>
+                                        <select onChange={this.changeResolution} value={this.state.dpi}>
                                             {this.props.dpis.map(dpi => {
                                                 return (<option key={dpi + "dpi"} value={dpi}>{dpi + " dpi"}</option>);
                                             })}
@@ -240,65 +244,56 @@ class MapExport extends React.Component {
                                     </td>
                                 </tr>
                             ) : null}
+                            {(formatConfiguration?.projections || []).length > 1 ? (
+                                <tr>
+                                    <td>{LocaleUtils.tr("mapexport.projection")}</td>
+                                    <td>
+                                        <select onChange={ev => this.setState({exportProjection: ev.target.value})} value={this.state.exportProjection}>
+                                            {formatConfiguration.projections.map(proj => (
+                                                <option key={proj} value={proj}>{proj}</option>
+                                            ))}
+                                        </select>
+                                    </td>
+                                </tr>
+                            ) : null}
                         </tbody>
                     </table>
-                    <input name="SERVICE" readOnly type="hidden" value="WMS" />
-                    <input name="VERSION" readOnly type="hidden" value={this.props.theme.version} />
-                    <input name="REQUEST" readOnly type="hidden" value="GetMap" />
-                    {Object.entries(exportParams).map(([key, value]) => (<input key={key} name={key} type="hidden" value={value} />))}
-                    <input name="TRANSPARENT" readOnly type="hidden" value="true" />
-                    <input name="TILED" readOnly type="hidden" value="false" />
-                    <input name="CRS" readOnly type="hidden" value={this.props.map.projection} />
-                    <input name="filename" readOnly type="hidden" value={filename} />
-                    <input name="BBOX" readOnly type="hidden" value={this.state.extent} />
-                    <input name="WIDTH" readOnly type="hidden" value={Math.round(this.state.width * scaleFactor)} />
-                    <input name="HEIGHT" readOnly type="hidden" value={Math.round(this.state.height * scaleFactor)} />
-                    {Object.keys(this.props.theme.watermark || {}).map(key => {
-                        return (<input key={key} name={"WATERMARK_" + key.toUpperCase()} readOnly type="hidden" value={this.props.theme.watermark[key]} />);
-                    })}
-                    <input name="HIGHLIGHT_GEOM" readOnly type="hidden" value={highlightParams.geoms.join(";")} />
-                    <input name="HIGHLIGHT_SYMBOL" readOnly type="hidden" value={highlightParams.styles.join(";")} />
-                    <input name="HIGHLIGHT_LABELSTRING" readOnly type="hidden" value={highlightParams.labels.join(";")} />
-                    <input name="HIGHLIGHT_LABELCOLOR" readOnly type="hidden" value={highlightParams.labelFillColors.join(";")} />
-                    <input name="HIGHLIGHT_LABELBUFFERCOLOR" readOnly type="hidden" value={highlightParams.labelOultineColors.join(";")} />
-                    <input name="HIGHLIGHT_LABELBUFFERSIZE" readOnly type="hidden" value={highlightParams.labelOutlineSizes.join(";")} />
-                    <input name="HIGHLIGHT_LABELSIZE" readOnly type="hidden" value={highlightParams.labelSizes.join(";")} />
-                    <input name="HIGHLIGHT_LABEL_DISTANCE" readOnly type="hidden" value={highlightParams.labelDist.join(";")} />
-                    <input name="csrf_token" type="hidden" value={MiscUtils.getCsrfToken()} />
                     <div className="button-bar">
-                        <button className="button" disabled={this.state.exporting || !this.state.extent} type="submit">
+                        <button className="button" disabled={this.state.exporting || isEmpty(this.state.extents)} type="submit">
                             {this.state.exporting ? (
-                                <span className="mapexport-wait"><Spinner /> {LocaleUtils.tr("mapexport.wait")}</span>
-                            ) : LocaleUtils.tr("mapexport.submit")}
+                                <span className="mapexport-wait"><Spinner /> {LocaleUtils.tr("common.wait")}</span>
+                            ) : LocaleUtils.tr("common.export")}
                         </button>
                     </div>
                 </form>
             </div>
         );
     };
-    renderFrame = () => {
+    renderPrintSelection = () => {
         if (this.state.pageSize !== null) {
-            const px2m =  1 / (this.state.dpi * 39.3701) * this.getExportScale(this.state);
+            const pageSize = this.props.pageSizes[this.state.pageSize];
             const frame = {
-                width: this.state.width * px2m,
-                height: this.state.height * px2m
+                width: pageSize.width,
+                height: pageSize.height
             };
-            return (<PrintFrame fixedFrame={frame} key="PrintFrame" map={this.props.map} />);
+            return (<PrintSelection allowRotation={false} allowScaling={this.props.allowedScales !== false}
+                center={this.props.map.center} fixedFrame={frame} geometryChanged={this.geometryChanged} key="PrintSelection" scale={this.state.scale}
+            />);
         } else {
-            return (<PrintFrame bboxSelected={this.bboxSelected} dpi={parseInt(this.state.dpi, 10)} key="PrintFrame" map={this.props.map} />);
+            return (<PrintSelection allowRotation={false} geometryChanged={this.geometryChanged} key="PrintSelection" />);
         }
     };
     render() {
-        const minMaxTooltip = this.state.minimized ? LocaleUtils.tr("print.maximize") : LocaleUtils.tr("print.minimize");
+        const minMaxTooltip = this.state.minimized ? LocaleUtils.tr("window.maximize") : LocaleUtils.tr("window.minimize");
         const extraTitlebarContent = (<Icon className="mapexport-minimize-maximize" icon={this.state.minimized ? 'chevron-down' : 'chevron-up'} onClick={() => this.setState((state) => ({minimized: !state.minimized}))} title={minMaxTooltip}/>);
         return (
-            <SideBar extraTitlebarContent={extraTitlebarContent} icon={"rasterexport"} id="MapExport" key="MapExport"
+            <SideBar extraClasses="MapExport" extraTitlebarContent={extraTitlebarContent} icon={"rasterexport"} id="MapExport" key="MapExport"
                 onHide={this.onHide} onShow={this.onShow} side={this.props.side}
-                title="appmenu.items.MapExport" width="20em">
+                title={LocaleUtils.tr("appmenu.items.MapExport")} width="20em">
                 {() => ({
                     body: this.state.minimized ? null : this.renderBody(),
                     extra: [
-                        this.renderFrame()
+                        this.renderPrintSelection()
                     ]
                 })}
             </SideBar>
@@ -318,53 +313,98 @@ class MapExport extends React.Component {
             }
             scale = this.props.allowedScales[closestIdx];
         }
-        let availableFormats = this.props.theme.availableFormats;
+        let availableFormats = [...this.props.theme.availableFormats || []];
+        (this.props.forceAvailableFormats || []).forEach(format => {
+            if (!availableFormats.includes(format)) {
+                availableFormats.push(format);
+            }
+        });
         if (!isEmpty(this.props.allowedFormats)) {
-            availableFormats = availableFormats.filter(fmt => this.props.allowedFormats.includes(fmt));
+            availableFormats = this.props.allowedFormats.filter(fmt => availableFormats.includes(fmt));
         }
         const selectedFormat = this.props.defaultFormat && availableFormats.includes(this.props.defaultFormat) ? this.props.defaultFormat : availableFormats[0];
-        const selectedFormatConfiguration = ((this.props.formatConfiguration?.[selectedFormat] || [])[0] || {}).name;
+        const formatConfigurations = selectedFormat ? this.props.formatConfiguration?.[selectedFormat.split(";")[0]] || [] : [];
         this.setState({
             scale: scale,
             availableFormats: availableFormats,
             selectedFormat: selectedFormat,
-            selectedFormatConfiguration: selectedFormatConfiguration
+            selectedFormatConfiguration: formatConfigurations[0]?.name,
+            exportProjection: this.getExportProjection(formatConfigurations[0]?.projections)
         });
+        this.props.setSnappingConfig(false, false);
     };
     onHide = () => {
         this.setState({
-            extent: '',
-            width: '',
-            height: ''
+            extents: [],
+            width: 0,
+            height: 0,
+            scale: null,
+            pageSize: null,
+            exporting: false
         });
     };
-    getExportScale = (state) => {
-        if (this.props.allowedScales === false) {
-            return Math.round(MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom));
-        } else {
-            return state.scale;
-        }
-    };
-    bboxSelected = (bbox, crs, pixelsize) => {
-        const version = this.props.theme.version;
-        let extent = '';
-        if (bbox) {
-            extent = (CoordinatesUtils.getAxisOrder(crs).substr(0, 2) === 'ne' && version === '1.3.0') ?
-                bbox[1] + "," + bbox[0] + "," + bbox[3] + "," + bbox[2] :
-                bbox.join(',');
-        }
-        this.setState({
-            extent: extent,
-            width: pixelsize[0],
-            height: pixelsize[1]
-        });
+    geometryChanged = (center, extents, rotation, scale) => {
+        this.setState(state => ({
+            extents: extents,
+            scale: scale ?? state.scale
+        }));
     };
     export = (ev) => {
         ev.preventDefault();
         this.setState({exporting: true});
-        const params = formDataEntries(new FormData(this.form));
 
-        // Add dimension values
+        const format = this.state.selectedFormat.split(";")[0];
+        const formatConfiguration = (this.props.formatConfiguration?.[format] || []).find(entry => entry.name === this.state.selectedFormatConfiguration);
+        const mapScale = Math.round(MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom));
+
+        const version = this.props.theme.version;
+        const crs = this.state.exportProjection;
+        const extent = CoordinatesUtils.reprojectBbox(this.state.extents.at(0) ?? [0, 0, 0, 0], this.props.map.projection, crs);
+        const formattedExtent = (CoordinatesUtils.getAxisOrder(crs).substring(0, 2) === 'ne' && version === '1.3.0') ?
+            extent[1] + "," + extent[0] + "," + extent[3] + "," + extent[2] :
+            extent.join(',');
+
+        let width = 0;
+        let height = 0;
+        if (this.state.pageSize !== null) {
+            width = Math.round((extent[2] - extent[0]) * this.state.dpi / (this.state.scale * 0.0254));
+            height = Math.round((extent[3] - extent[1]) * this.state.dpi / (this.state.scale * 0.0254));
+        } else {
+            const getPixelFromCoordinate = MapUtils.getHook(MapUtils.GET_PIXEL_FROM_COORDINATES_HOOK);
+            const p1 = getPixelFromCoordinate(extent.slice(0, 2));
+            const p2 = getPixelFromCoordinate(extent.slice(2, 4));
+            width = Math.round(Math.abs(p1[0] - p2[0]) * this.state.dpi / 96 * mapScale / this.state.scale);
+            height = Math.round(Math.abs(p1[1] - p2[1]) * this.state.dpi / 96 * mapScale / this.state.scale);
+        }
+
+        const ext = format.split("/").pop();
+        const timestamp = dayjs(new Date()).format("YYYYMMDD_HHmmss");
+        const fileName = this.props.fileNameTemplate
+            .replace("{username}", ConfigUtils.getConfigProp("username", null, ""))
+            .replace("{tenant}", ConfigUtils.getConfigProp("tenant", null, ""))
+            .replace("{theme}", this.props.theme.id)
+            .replace("{themeTitle}", this.props.theme.title || "")
+            .replace("{timestamp}", timestamp) + "." + ext;
+
+
+        const params = {};
+
+        // Base request params
+        params.SERVICE = "WMS";
+        params.VERSION = version;
+        params.REQUEST = "GetMap";
+        params.FORMAT = this.state.selectedFormat;
+        params.DPI = this.state.dpi;
+        params.TRANSPARENT = true;
+        params.TILED = false;
+        params.CRS = crs;
+        params.BBOX = formattedExtent;
+        params.WIDTH = width;
+        params.HEIGHT = height;
+        params.filename = fileName;
+        params.FILTER_GEOM = this.props.filter.filterGeom ? VectorLayerUtils.geoJSONGeomToWkt(VectorLayerUtils.reprojectGeometry(this.props.filter.filterGeom, this.props.map.projection, crs)) : "";
+
+        // Dimension values
         this.props.layers.forEach(layer => {
             if (layer.role === LayerRole.THEME) {
                 Object.entries(layer.dimensionValues || {}).forEach(([key, value]) => {
@@ -376,9 +416,6 @@ class MapExport extends React.Component {
         });
 
         // Add parameters from custom format configuration
-        const format = this.state.selectedFormat.split(";")[0];
-        const formatConfiguration = (this.props.formatConfiguration?.[format] || []).find(entry => entry.name === this.state.selectedFormatConfiguration);
-
         if (formatConfiguration) {
             const keyCaseMap = Object.keys(params).reduce((res, key) => ({...res, [key.toLowerCase()]: key}), {});
             (formatConfiguration.extraQuery || "").split(/[?&]/).filter(Boolean).forEach(entry => {
@@ -395,6 +432,39 @@ class MapExport extends React.Component {
             }
         }
 
+        if (this.state.selectedFormat === "application/dxf") {
+            this.dxfExport(params, fileName, formatConfiguration);
+        } else {
+            this.genericExport(params, fileName, formatConfiguration, mapScale);
+        }
+    };
+    genericExport = (params, fileName, formatConfiguration, mapScale) => {
+        // Layer params
+        const exportExternalLayers = this.props.exportExternalLayers && ConfigUtils.getConfigProp("qgisServerVersion", null, 3) >= 3;
+        const exportParams = LayerUtils.collectPrintParams(this.props.layers, this.props.theme, this.state.scale, this.state.exportProjection, exportExternalLayers, !!formatConfiguration?.baseLayer);
+        Object.assign(params, exportParams);
+
+        // Highlight params
+        const highlightParams = VectorLayerUtils.createPrintHighlighParams(this.props.layers, this.state.exportProjection, mapScale, this.state.dpi);
+        params.HIGHLIGHT_GEOM = highlightParams.geoms.join(";");
+        params.HIGHLIGHT_SYMBOL = highlightParams.styles.join(";");
+        params.HIGHLIGHT_LABELSTRING = highlightParams.labels.join(";");
+        params.HIGHLIGHT_LABELCOLOR = highlightParams.labelFillColors.join(";");
+        params.HIGHLIGHT_LABELBUFFERCOLOR = highlightParams.labelOutlineColors.join(";");
+        params.HIGHLIGHT_LABELBUFFERSIZE = highlightParams.labelOutlineSizes.join(";");
+        params.HIGHLIGHT_LABELSIZE = highlightParams.labelSizes.join(";");
+        params.HIGHLIGHT_LABEL_DISTANCE = highlightParams.labelDist.join(";");
+        params.HIGHLIGHT_LABEL_ROTATION = highlightParams.labelRotations.join(";");
+        params.HIGHLIGHT_LABELFRAMEBACKGROUNDCOLOR = highlightParams.labelFrameColors.join(";");
+        params.HIGHLIGHT_LABELFRAMEOUTLINECOLOR = highlightParams.labelFrameOutlines.join(";");
+        params.HIGHLIGHT_LABELFRAMESIZE = highlightParams.labelFrameSizes.join(";");
+        params.HIGHLIGHT_LABELFRAMEOUTLINEWIDTH = highlightParams.labelFrameOutlineWidths.join(";");
+
+        // Watermark params
+        Object.keys(this.props.theme.watermark || {}).forEach(key => {
+            params["WATERMARK_" + key.toUpperCase()] = this.props.theme.watermark[key];
+        });
+
         const data = Object.entries(params).map((pair) =>
             pair.map(entry => encodeURIComponent(entry).replace(/%20/g, '+')).join("=")
         ).join("&");
@@ -402,11 +472,11 @@ class MapExport extends React.Component {
             headers: {'Content-Type': 'application/x-www-form-urlencoded' },
             responseType: "arraybuffer"
         };
-        axios.post(this.props.theme.url, data, config).then(response => {
+        axios.post(formatConfiguration?.serviceUrl ?? this.props.theme.url, data, config).then(response => {
             this.setState({exporting: false});
             const contentType = response.headers["content-type"];
-            const ext = this.state.selectedFormat.split(";")[0].split("/").pop();
-            FileSaver.saveAs(new Blob([response.data], {type: contentType}), this.props.theme.name + '.' + ext);
+
+            FileSaver.saveAs(new Blob([response.data], {type: contentType}), fileName);
         }).catch(e => {
             this.setState({exporting: false});
             if (e.response) {
@@ -417,14 +487,85 @@ class MapExport extends React.Component {
             alert('Export failed');
         });
     };
+    dxfExport = (baseParams, fileName, formatConfiguration) => {
+        // If formatConfiguration overrides LAYERS, only export theme layer with those layers
+        const layersOverridden = (formatConfiguration.extraQuery || "").split(/[?&]/).find(
+            entry => entry.split("=")[0].toLowerCase() === "layers"
+        ) !== undefined;
+        let jobs = [];
+        if (layersOverridden) {
+            jobs.push({
+                layer: this.props.theme,
+                params: baseParams
+            });
+        } else {
+            jobs = this.props.layers.filter(
+                layer => layer.type === 'wms' && layer.role > LayerRole.BACKGROUND && layer.mapFormats?.includes("application/dxf")
+            ).reverse().map(layer => ({
+                layer: layer,
+                params: {
+                    ...baseParams,
+                    LAYERS: layer.params.LAYERS,
+                    OPACITIES: layer.params.OPACITIES,
+                    STYLES: layer.params.STYLES,
+                    FILTER: layer.params.FILTER ?? ''
+                }
+            }));
+        }
+
+        const promises = jobs.map(({layer, params}) => {
+            const data = Object.entries(params).map((pair) =>
+                pair.map(entry => encodeURIComponent(entry).replace(/%20/g, '+')).join("=")
+            ).join("&");
+            const config = {
+                headers: {'Content-Type': 'application/x-www-form-urlencoded' },
+                responseType: "arraybuffer"
+            };
+            return new Promise((resolve, reject) => {
+                axios.post(formatConfiguration?.serviceUrl ?? layer.url, data, config).then(response => {
+                    resolve(response);
+                }).catch((e) => {
+                    /* eslint-disable-next-line */
+                    console.warn(e);
+                    resolve(null);
+                });
+            });
+        });
+        Promise.all(promises).then((responses) => {
+            const dxfResponses = responses.filter(
+                response => response && response.headers['content-type'] === "application/dxf"
+            );
+            const dxfDocuments = dxfResponses.map(response => explodeDxf(decodeDxf(response.data)));
+            if (dxfDocuments.length !== 0) {
+                const dxfDocument = mergeDxf(dxfDocuments);
+                // The merged document keeps the first response's header, so its encoding applies to the whole file
+                const encoding = detectDxfEncoding(dxfResponses[0].data);
+                // QGIS Server writes a non-standard $DWGCODEPAGE value ("8859_1") some readers reject outright
+                setDwgCodepage(dxfDocument, encoding);
+                const result = implodeDxf(dxfDocument);
+                const encoder = new TextEncoder(encoding);
+                FileSaver.saveAs(new Blob([encoder.encode(result)], {type: "application/dxf"}), fileName);
+                /*
+                responses.forEach((response, idx) => {
+                    FileSaver.saveAs(new Blob([response.data], {type: "application/dxf"}), "orig_" + idx + "_" + fileName);
+                });
+                */
+            } else {
+                /* eslint-disable-next-line */
+                alert('Export failed');
+            }
+            this.setState({exporting: false});
+        });
+    };
 }
 
 const selector = (state) => ({
     theme: state.theme.current,
     map: state.map,
-    layers: state.layers.flat
+    layers: state.layers.flat,
+    filter: state.layers.filter
 });
 
 export default connect(selector, {
-    setCurrentTask: setCurrentTask
+    setSnappingConfig: setSnappingConfig
 })(MapExport);

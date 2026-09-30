@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,15 +8,18 @@
 
 import React from 'react';
 import {connect} from 'react-redux';
+
+import isEmpty from 'lodash.isempty';
 import PropTypes from 'prop-types';
+
 import {setCurrentTask} from '../actions/task';
 import ResizeableWindow from '../components/ResizeableWindow';
 import {Image} from '../components/widgets/Primitives';
 import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
 import MapUtils from '../utils/MapUtils';
+
 import './style/MapLegend.css';
-import isEmpty from 'lodash.isempty';
 
 /**
  * Displays the map legend in a floating dialog.
@@ -34,9 +37,11 @@ class MapLegend extends React.Component {
         addLayerTitles: PropTypes.bool,
         /** Whether to display a BBOX-dependent legend by default. */
         bboxDependentLegend: PropTypes.bool,
+        /** List of layernames to exclude from the legend. */
+        excludeLayers: PropTypes.array,
         /** Extra parameters to add to the GetLegendGraphics request. */
         extraLegendParameters: PropTypes.string,
-        /** Default window geometry with size, position and docking status. Positive position values (including '0') are related to top (InitialY) and left (InitialX), negative values (including '-0') to bottom (InitialY) and right (InitialX). */
+        /** Default window geometry with size, position and docking status. A locked window is not closeable and not resizeable. Positive position values (including '0') are related to top (InitialY) and left (InitialX), negative values (including '-0') to bottom (InitialY) and right (InitialX). */
         geometry: PropTypes.shape({
             initialWidth: PropTypes.number,
             initialHeight: PropTypes.number,
@@ -46,17 +51,23 @@ class MapLegend extends React.Component {
             side: PropTypes.string
         }),
         layers: PropTypes.array,
+        /** Whether the legend window is locked (always visible, not moveable or closeable). Set position and size via `geometry`. */
+        lockedWindow: PropTypes.bool,
         map: PropTypes.object,
         /** Whether to only include enabled layers in the legend by default. */
         onlyVisibleLegend: PropTypes.bool,
         /** Whether to display a scale-dependent legend by default. */
         scaleDependentLegend: PropTypes.bool,
-        setCurrentTask: PropTypes.func
+        setCurrentTask: PropTypes.func,
+        /** Whether to show the MapLegend on startup. Useful if `startupTask` is already set to another task. */
+        showOnStartup: PropTypes.bool,
+        theme: PropTypes.object
     };
     static defaultProps = {
         addGroupTitles: false,
         addLayerTitles: false,
         bboxDependentLegend: false,
+        excludeLayers: [],
         onlyVisibleLegend: false,
         scaleDependentLegend: false,
         geometry: {
@@ -79,6 +90,7 @@ class MapLegend extends React.Component {
         this.state.onlyVisibleLegend = props.onlyVisibleLegend;
         this.state.bboxDependentLegend = props.bboxDependentLegend;
         this.state.scaleDependentLegend = props.scaleDependentLegend;
+        this.state.visible = props.showOnStartup;
     }
     componentDidUpdate(prevProps) {
         if (this.props.active && !prevProps.active) {
@@ -86,26 +98,30 @@ class MapLegend extends React.Component {
             // Clear task immediately, visibility is stored as state
             this.props.setCurrentTask(null);
         }
+        // Honour showOnStartup set as a per-theme setting
+        if (this.props.theme !== prevProps.theme && this.props.showOnStartup !== undefined) {
+            this.setState({visible: this.props.showOnStartup});
+        }
     }
     render() {
-        if (!this.state.visible) {
+        if (!this.state.visible && !this.props.lockedWindow) {
             return null;
         }
         const mapScale = MapUtils.computeForZoom(this.props.map.scales, this.props.map.zoom);
         const extraControls = [
-            {icon: "eye", callback: () => this.setState((state) => ({onlyVisibleLegend: !state.onlyVisibleLegend})), active: this.state.onlyVisibleLegend, msgid: LocaleUtils.trmsg("maplegend.onlyvisible")},
-            {icon: "box", callback: () => this.setState((state) => ({bboxDependentLegend: !state.bboxDependentLegend})), active: this.state.bboxDependentLegend, msgid: LocaleUtils.trmsg("maplegend.bboxdependent")},
-            {icon: "scale", callback: () => this.setState((state) => ({scaleDependentLegend: !state.scaleDependentLegend})), active: this.state.scaleDependentLegend, msgid: LocaleUtils.trmsg("maplegend.scaledependent")}
+            {icon: "eye", callback: () => this.setState((state) => ({onlyVisibleLegend: !state.onlyVisibleLegend})), active: this.state.onlyVisibleLegend, title: LocaleUtils.tr("maplegend.onlyvisible")},
+            {icon: "box", callback: () => this.setState((state) => ({bboxDependentLegend: !state.bboxDependentLegend})), active: this.state.bboxDependentLegend, title: LocaleUtils.tr("maplegend.bboxdependent")},
+            {icon: "scale", callback: () => this.setState((state) => ({scaleDependentLegend: !state.scaleDependentLegend})), active: this.state.scaleDependentLegend, title: LocaleUtils.tr("maplegend.scaledependent")}
         ];
 
         return (
-            <ResizeableWindow dockable={this.props.geometry.side} extraControls={extraControls} icon="list-alt"
-                initialHeight={this.props.geometry.initialHeight} initialWidth={this.props.geometry.initialWidth}
+            <ResizeableWindow dockable={this.props.lockedWindow ? false : this.props.geometry.side} extraControls={extraControls}
+                icon="list-alt" initialHeight={this.props.geometry.initialHeight} initialWidth={this.props.geometry.initialWidth}
                 initialX={this.props.geometry.initialX} initialY={this.props.geometry.initialY}
-                initiallyDocked={this.props.geometry.initiallyDocked}
-                onClose={this.onClose} title={LocaleUtils.trmsg("maplegend.windowtitle")}
+                initiallyDocked={this.props.geometry.initiallyDocked} maximizeable={false}
+                onClose={this.props.lockedWindow ? null : this.onClose} title={LocaleUtils.tr("maplegend.windowtitle")}
             >
-                <div className="map-legend" role="body">
+                <div className="map-legend">
                     {this.props.layers.map(layer => {
                         if (this.state.onlyVisibleLegend && !layer.visibility) {
                             return null;
@@ -131,7 +147,9 @@ class MapLegend extends React.Component {
     };
     printLayerLegend = (layer, sublayer, mapScale) => {
         const isCategorized = (sublayer.sublayers || []).find(entry => entry.category_sublayer === true);
-        if (sublayer.sublayers && !isCategorized && (!this.state.onlyVisibleLegend || sublayer.visibility)) {
+        if (this.props.excludeLayers.includes(sublayer.name)) {
+            return null;
+        } else if (sublayer.sublayers && !isCategorized && (!this.state.onlyVisibleLegend || sublayer.visibility)) {
             if (this.props.addGroupTitles) {
                 const children = sublayer.sublayers.map(subsublayer => this.printLayerLegend(layer, subsublayer, mapScale)).filter(x => x);
                 if (isEmpty(children)) {
@@ -156,12 +174,12 @@ class MapLegend extends React.Component {
             if ((this.state.onlyVisibleLegend || this.state.scaleDependentLegend) && !LayerUtils.layerScaleInRange(sublayer, mapScale)) {
                 return null;
             }
-            const request = LayerUtils.getLegendUrl(layer, {name: sublayer.name}, mapScale, this.props.map, this.state.bboxDependentLegend, this.state.scaleDependentLegend, this.props.extraLegendParameters);
+            const request = LayerUtils.getLegendUrl(layer, sublayer, mapScale, this.props.map, this.state.bboxDependentLegend, this.state.scaleDependentLegend, this.props.extraLegendParameters);
             return request ? (
                 <div className="map-legend-legend-entry" key={sublayer.name}>
                     <div>
                         {this.props.addLayerTitles && !sublayer.category_sublayer ? (<div className="map-legend-entry-title">{sublayer.title || sublayer.name}</div>) : null}
-                        <div><Image src={request} /></div>
+                        <div className="map-legend-entry-image"><Image src={request} /></div>
                     </div>
                 </div>) : null;
         }
@@ -171,7 +189,8 @@ class MapLegend extends React.Component {
 export default connect(state => ({
     active: state.task.id === "MapLegend",
     layers: state.layers.flat,
-    map: state.map
+    map: state.map,
+    theme: state.theme.current
 }), {
     setCurrentTask: setCurrentTask
 })(MapLegend);

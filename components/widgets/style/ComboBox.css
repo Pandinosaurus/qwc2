@@ -6,42 +6,54 @@ div.combobox {
     -webkit-user-select: none;
     border: 1px solid var(--border-color);
     background-color: var(--list-bg-color);
+    height: 2em;
+    position: relative;
+}
+
+div.combobox > input {
+    position: absolute;
+    inset: 0;
+    z-index: -10000;
 }
 
 div.combobox-button {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
-    padding: 0.25em 0.125em;
     height: 100%;
+    position: relative;
 }
 
 span.combobox-button-content {
     padding: 0 0.25em;
     flex: 1 1 auto;
     white-space: nowrap;
+    line-height: 2em;
+}
+
+input.combobox-button-filter {
+    position: absolute;
+    z-index: 1;
+    border: none!important;
+    background-color: transparent!important;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
 }
 
 div.combobox-button > span.icon {
     font-size: 100%;
     flex: 0 0 1em;
+    margin: 0.25em;
 }
 
-div.combobox-menu {
-    border: 1px solid var(--border-color);
-    background-color: var(--list-bg-color);
-    user-select: none;
-    -webkit-touch-callout: none;
-    -webkit-user-select: none;
+div.combobox-disabled div.combobox-button > span.icon {
+    color: var(--text-color-disabled);
 }
 
 div.combobox-menu-entry {
-    padding: 0.25em;
-}
-
-div.combobox-menu-entry:not(.combobox-menu-entry-disabled):hover  {
-    background-color: var(--list-item-bg-color-hover);
-    color: var(--list-item-text-color-hover);
+    padding: 0.25em 0.5em;
 }
 
 div.combobox-menu-entry-active {
@@ -49,13 +61,9 @@ div.combobox-menu-entry-active {
     color: var(--list-item-text-color-active);
 }
 
-div.combobox-menu-entry-active:hover {
-    background-color: var(--list-item-bg-color-active-hover)!important;
-    color: var(--list-item-text-color-active-hover)!important;
-}
-
-div.combobox-menu-entry-disabled {
-    color: var(--text-color-disabled);
+div.combobox-menu-entry-active:focus {
+    background-color: var(--list-item-bg-color-active-hover);
+    color: var(--list-item-text-color-active-hover);
 }
 
 div.combobox-menu-entry-group-header {
@@ -63,6 +71,10 @@ div.combobox-menu-entry-group-header {
     background-color: var(--list-section-bg-color);
     color: var(--list-section-text-color);
     font-weight: bold;
+}
+
+div.combobox-menu-entry-group-header:focus {
+    background-color: var(--list-section-bg-color-hover);
 }
 
 div.combobox-menu-entry-group-header > span.icon {

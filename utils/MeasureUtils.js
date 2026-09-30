@@ -1,6 +1,6 @@
 /**
  * Copyright 2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,42 +8,60 @@
  */
 
 import ol from 'openlayers';
+
 import ConfigUtils from './ConfigUtils';
 import CoordinatesUtils from "./CoordinatesUtils";
 import LocaleUtils from './LocaleUtils';
 
 const MeasureUtils = {
-    getFormattedBearingValue(azimuth) {
-        let bearing = "";
-        if (azimuth >= 0 && azimuth < 90) {
-            bearing = "N " + this.degToDms(azimuth) + " E";
-        } else if (azimuth > 90 && azimuth <= 180) {
-            bearing = "S " + this.degToDms(180.0 - azimuth) + " E";
-        } else if (azimuth > 180 && azimuth < 270) {
-            bearing = "S " + this.degToDms(azimuth - 180.0 ) + " W";
-        } else if (azimuth >= 270 && azimuth <= 360) {
-            bearing = "N " + this.degToDms(360 - azimuth ) + " W";
+    getFormattedBearingValue(azimuth = 0) {
+        const format = ConfigUtils.getConfigProp("bearingFormat") || "bearing";
+        const precision = ConfigUtils.getConfigProp("bearingPrecision") || 0;
+        const roundToPrecision = (val) => {
+            return Math.round((val + Number.EPSILON) * 10 ** precision) / 10 ** precision;
+        };
+        const normalizedAzimuth = ((azimuth % 360) + 360) % 360;
+        if (format === "bearing") {
+            let bearing = "";
+            if (normalizedAzimuth >= 0 && normalizedAzimuth < 90) {
+                bearing = `N ${this.degToDms(normalizedAzimuth)} E`;
+            } else if (normalizedAzimuth > 90 && normalizedAzimuth <= 180) {
+                bearing = `S ${this.degToDms(180 - normalizedAzimuth)} E`;
+            } else if (normalizedAzimuth > 180 && normalizedAzimuth < 270) {
+                bearing = `S ${this.degToDms(normalizedAzimuth - 180)} W`;
+            } else if (normalizedAzimuth >= 270 && normalizedAzimuth <= 360) {
+                bearing = `N ${this.degToDms(360 - normalizedAzimuth)} W`;
+            }
+            return bearing;
         }
-        return bearing;
-    },
-    getFormattedCoordinate(coo, srcCrs = null, dstCrs = null, decimals = -1) {
-        if (srcCrs && dstCrs && srcCrs !== dstCrs) {
-            coo = CoordinatesUtils.reproject(coo, srcCrs, dstCrs);
+        if (format === "azimuth") {
+            return `${roundToPrecision(normalizedAzimuth)}°`;
         }
-        if (decimals < 0) {
-            // Automatically set decimals
-            if (CoordinatesUtils.getUnits(dstCrs) === 'degrees') {
-                decimals = 4;
+        if (format === "azimuth180") {
+            if (normalizedAzimuth <= 180) {
+                return `${roundToPrecision(normalizedAzimuth)}°`;
             } else {
-                decimals = 0;
+                return `${roundToPrecision(normalizedAzimuth - 360)}°`;
             }
         }
-        return coo.map(ord => LocaleUtils.toLocaleFixed(ord, decimals)).join(", ");
+        if (format === "bearingEW") {
+            if (normalizedAzimuth < 180) {
+                return `${roundToPrecision(normalizedAzimuth)}°E`;
+            } else if (normalizedAzimuth > 180) {
+                return `${roundToPrecision((360 - normalizedAzimuth))}°W`;
+            } else {
+                return "180°";
+            }
+        }
+        return `${roundToPrecision(normalizedAzimuth)}°`;
     },
     formatDuration(valueSeconds) {
         return new Date(valueSeconds * 1000).toISOString().slice(11, 19);
     },
-    formatMeasurement(valueMetric, isArea, unit = 'metric', decimals = 2, withUnit = true) {
+    formatMeasurement(valueMetric, isArea, unit = 'metric', decimals = -1, withUnit = true) {
+        if (decimals < 0) {
+            decimals = ConfigUtils.getConfigProp("measurementPrecision", null, 2);
+        }
         let result = '';
         let unitlabel = unit;
         switch (unit) {
@@ -138,6 +156,33 @@ const MeasureUtils = {
         }
         return result;
     },
+    convertLength(length, fromUnit, toUnit) {
+        let lengthMeters = length;
+        switch (fromUnit) {
+        case 'm':
+            lengthMeters = length; break;
+        case 'ft':
+            lengthMeters = length * 0.3048; break;
+        case 'km':
+            lengthMeters = length * 1000; break;
+        case 'mi':
+            lengthMeters = length * 1609.34; break;
+        default:
+            lengthMeters = length; break;
+        }
+        switch (toUnit) {
+        case 'm':
+            return lengthMeters;
+        case 'ft':
+            return lengthMeters * 3.28084;
+        case 'km':
+            return lengthMeters * 0.001;
+        case 'mi':
+            return lengthMeters * 0.000621371;
+        default:
+            return lengthMeters;
+        }
+    },
     getFormattedArea(unit, area, decimals = 2, withUnit = true) {
         let result = '';
         let unitlabel = unit;
@@ -178,24 +223,34 @@ const MeasureUtils = {
             lenUnit: settings.lenUnit,
             areaUnit: settings.areaUnit
         };
+        const displayCrs = settings.displayCrs ?? featureCrs;
         feature.set('label', '');
         feature.set('segment_labels', undefined);
         const geom = feature.getGeometry();
         if (geomType === 'Point') {
-            feature.set('label', MeasureUtils.getFormattedCoordinate(geom.getCoordinates(), settings.mapCrs, settings.displayCrs));
+            feature.set('label', CoordinatesUtils.getFormattedCoordinate(geom.getCoordinates(), featureCrs, displayCrs));
         } else if (geomType === 'LineString') {
             const lengths = MeasureUtils.computeSegmentLengths(geom.getCoordinates(), featureCrs, geodesic);
             measurements.segment_lengths = lengths;
             measurements.length = lengths.reduce((sum, len) => sum + len, 0);
-            feature.set('segment_labels', lengths.map(length => MeasureUtils.formatMeasurement(length, false, settings.lenUnit, settings.decimals)));
+            feature.set('segment_labels', lengths.map(length => MeasureUtils.formatMeasurement(length, false, settings.lenUnit)));
+            if (geom.getCoordinates().length > 2) {
+                feature.set('end_label', MeasureUtils.formatMeasurement(measurements.length, false, settings.lenUnit));
+            } else {
+                feature.unset('end_label');
+            }
         } else if (["Ellipse", "Polygon", "Square", "Box"].includes(geomType)) {
             const area = MeasureUtils.computeArea(geom, featureCrs, geodesic);
+            const lengths = MeasureUtils.computeSegmentLengths(geom.getCoordinates()[0], featureCrs, geodesic);
             measurements.area = area;
-            feature.set('label', MeasureUtils.formatMeasurement(area, true, settings.areaUnit, settings.decimals));
+            feature.set('label', MeasureUtils.formatMeasurement(area, true, settings.areaUnit));
+            if (settings.showPerimeterLength) {
+                feature.set('end_label', MeasureUtils.formatMeasurement(lengths.reduce((sum, len) => sum + len, 0), false, settings.lenUnit));
+            }
         } else if (geomType === 'Circle') {
             const radius = geom.getRadius();
             measurements.radius = radius;
-            feature.set('label', "r = " + MeasureUtils.formatMeasurement(radius, false, settings.lenUnit, settings.decimals));
+            feature.set('label', "r = " + MeasureUtils.formatMeasurement(radius, false, settings.lenUnit));
         } else if (geomType === 'Bearing') {
             const coo = geom.getCoordinates();
             measurements.bearing = CoordinatesUtils.calculateAzimuth(coo[0], coo[1], featureCrs);
@@ -229,6 +284,25 @@ const MeasureUtils = {
             const conv = units === 'feet' ? 0.3048 : 1;
             return geometry.getArea() * conv * conv;
         }
+    },
+    computeOffsetCoordinate(base, target, distance, featureCrs, geodesic) {
+        const dx = target[0] - base[0];
+        const dy = target[1] - base[1];
+        const length = Math.sqrt(dx * dx + dy * dy);
+        if (length === 0) {
+            return null;
+        }
+        if (geodesic || CoordinatesUtils.getUnits(featureCrs) === 'degrees') {
+            const azimuth = CoordinatesUtils.calculateAzimuth(base, target, featureCrs) * Math.PI / 180;
+            const wgsCoo = ol.sphere.offset(CoordinatesUtils.reproject(base, featureCrs, "EPSG:4326"), distance, azimuth);
+            return CoordinatesUtils.reproject(wgsCoo, "EPSG:4326", featureCrs);
+        }
+        const metersPerUnit = ol.proj.get(featureCrs).getMetersPerUnit();
+        if (!metersPerUnit) {
+            return null;
+        }
+        const scale = distance / metersPerUnit / length;
+        return [base[0] + dx * scale, base[1] + dy * scale];
     }
 };
 

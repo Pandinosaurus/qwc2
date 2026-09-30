@@ -1,0 +1,67 @@
+/**
+ * Copyright Sourcepole AG
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+import CoordinateSystem from '@giro3d/giro3d/core/geographic/CoordinateSystem';
+import ColorLayer from '@giro3d/giro3d/core/layer/ColorLayer';
+import StaticFeatureSource from '@giro3d/giro3d/sources/StaticFeatureSource';
+import VectorSource from "@giro3d/giro3d/sources/VectorSource.js";
+import ol from 'openlayers';
+
+import FeatureStyles from '../../../utils/FeatureStyles';
+import {createFeatures, featureStyleFunction, updateFeatures} from '../../map/layers/VectorLayer';
+import {Layer3D} from './Layer3D';
+
+
+export default {
+    create3d: (options, projection) => {
+        return new Layer3D(options.id, new ColorLayer({
+            name: options.name,
+            source: new VectorSource({
+                dataProjection: CoordinateSystem.get(projection),
+                data: createFeatures(options, projection, true),
+                format: new ol.format.GeoJSON(),
+                style: options.styleFunction || (feature => {
+                    const styleName = options.styleName || 'default';
+                    const styleOptions = options.styleOptions || {};
+                    return FeatureStyles[styleName](feature, styleOptions);
+                })
+            })
+        }));
+    },
+    update3d: (mapLayer, newOptions, oldOptions, projection) => {
+        const layer = mapLayer.layer();
+        const source = layer.source.source;
+        if (newOptions.styleName !== oldOptions.styleName || newOptions.styleOptions !== oldOptions.styleOptions) {
+            source.setStyle(featureStyleFunction(newOptions));
+        } else if (newOptions.styleFunction !== oldOptions.styleFunction) {
+            source.setStyle(newOptions.styleFunction);
+        }
+        if (newOptions.features !== oldOptions.features) {
+            updateFeatures(source, newOptions, oldOptions, projection, true);
+        } else if ((oldOptions.rev || 0) !== (newOptions.rev || 0)) {
+            source.update();
+        }
+    },
+    getFields: (options) => {
+        return new Promise((resolve) => {
+            const fields = new Set();
+            (options.features || []).forEach(feature => {
+                Object.keys(feature.properties).forEach(key => fields.add(key));
+            });
+            resolve([...fields.values()]);
+        });
+    },
+    createFeatureSource: (layer, options, projection) => {
+        const colorlayer = layer.layer();
+        const crs = CoordinateSystem.get(projection);
+        return new StaticFeatureSource({
+            coordinateSystem: crs,
+            features: colorlayer.source.source.getFeatures().filter(f => f.getGeometry().getType() === "Polygon")
+        });
+    }
+};

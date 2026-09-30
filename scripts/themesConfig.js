@@ -1,33 +1,35 @@
+#!/usr/bin/env node
+
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-const urlUtil = require('url');
 const axios = require('axios');
-const xml2js = require('xml2js');
+const urlUtil = require('url');
+const XMLParser = require('fast-xml-parser').XMLParser;
 const fs = require('fs');
-const path = require('path');
-const objectPath = require('object-path');
 const isEmpty = require('lodash.isempty');
-const uuidv1 = require('uuid').v1;
-const os = require('os');
+const objectPath = require('object-path');
+const path = require('path');
+const uuidv4 = require('uuid').v1;
 const dns = require('dns');
+const os = require('os');
 
 const { lookup, lookupService } = dns.promises;
 
 let hostFqdn = "";
-const themesConfigPath = process.env.QWC2_THEMES_CONFIG || "themesConfig.json";
+const themesConfigPath = process.env.QWC2_THEMES_CONFIG || "static/themesConfig.json";
 
 const usedThemeIds = [];
 const autogenExternalLayers = [];
 
 function uniqueThemeId(themeName) {
     if (!themeName) {
-        return uuidv1();
+        return uuidv4();
     }
     if (usedThemeIds.includes(themeName)) {
         let i = 1;
@@ -52,6 +54,7 @@ function getThumbnail(configItem, resultItem, layers, crs, extent, resolve, prox
         }
     }
 
+    /* eslint-disable-next-line */
     console.error("Using WMS GetMap to generate thumbnail for " + configItem.url);
 
     // WMS GetMap request
@@ -105,6 +108,7 @@ function getThumbnail(configItem, resultItem, layers, crs, extent, resolve, prox
         // finish task
         resolve(true);
     }).catch((error) => {
+        /* eslint-disable-next-line */
         console.error("ERROR generating thumbnail for WMS " + configItem.url + ":\n", error);
         resultItem.thumbnail = "img/mapthumbs/default.jpg";
         // finish task
@@ -125,7 +129,7 @@ function getEditConfig(editConfig) {
     return null;
 }
 // convert non-array object to array containing the object
-// used to restore arrays lost by 'explicitArray: false' xml2js option
+// used to restore arrays lost by xml -> json conversion
 function toArray(obj) {
     if (obj !== undefined) {
         return Array.isArray(obj) ? obj : [obj];
@@ -151,49 +155,52 @@ function getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, co
         title: layer.Title
     };
     if (layer.Layer === undefined) {
-        if (!layer.$ || layer.$.geometryType === "WKBNoGeometry" || layer.$.geometryType === "NoGeometry") {
+        if (layer.$_geometryType === "WKBNoGeometry" || layer.$_geometryType === "NoGeometry") {
             // skip layers without geometry
             return;
         }
 
         // layer
-        layerEntry.geometryType = layer.$.geometryType;
-        if (layer.$.visibilityChecked !== undefined) {
-            layerEntry.visibility = layer.$.visibilityChecked === '1';
+        layerEntry.geometryType = layer.$_geometryType;
+        if (layer.$_visibilityChecked !== undefined) {
+            layerEntry.visibility = layer.$_visibilityChecked === '1';
         } else {
-            layerEntry.visibility = layer.$.visible === '1';
+            layerEntry.visibility = layer.$_visible === '1';
         }
         if (layerEntry.visibility) {
             // collect visible layers
             visibleLayers.push(layer.Name);
         }
-        layerEntry.queryable = layer.$.queryable === '1';
+        if (layer.PrimaryKey?.PrimaryKeyAttribute) {
+            layerEntry.primary_key = layer.PrimaryKey.PrimaryKeyAttribute;
+        }
+        layerEntry.queryable = layer.$_queryable === '1';
         if (layerEntry.queryable) {
-            layerEntry.displayField = layer.$.displayField;
+            layerEntry.displayField = layer.$_displayField;
         }
         if (layer.Attribution) {
             layerEntry.attribution = {
                 Title: layer.Attribution.Title,
-                OnlineResource: layer.Attribution.OnlineResource ? layer.Attribution.OnlineResource.$["xlink:href"] : ""
+                OnlineResource: layer.Attribution.OnlineResource ? layer.Attribution.OnlineResource.$_href : ""
             };
         }
         if (layer.Abstract) {
             layerEntry.abstract = layer.Abstract;
         }
         if (layer.DataURL && layer.DataURL.OnlineResource) {
-            layerEntry.dataUrl = layer.DataURL.OnlineResource.$['xlink:href'];
+            layerEntry.dataUrl = layer.DataURL.OnlineResource.$_href;
             if (layerEntry.dataUrl.startsWith("wms:")) {
                 externalLayers.push({internalLayer: layer.Name, name: layerEntry.dataUrl});
                 layerEntry.dataUrl = "";
             }
         }
         if (layer.MetadataURL && layer.MetadataURL.OnlineResource) {
-            layerEntry.metadataUrl = layer.MetadataURL.OnlineResource.$['xlink:href'];
+            layerEntry.metadataUrl = layer.MetadataURL.OnlineResource.$_href;
         }
-        if (layer.$.transparency) {
-            layerEntry.opacity = 255 - Math.floor(parseFloat(layer.$.transparency) * 255);
-        } else if (layer.$.opacity) {
-            layerEntry.opacity = Math.round(parseFloat(layer.$.opacity) * 255);
+        if (layer.$_transparency) {
+            layerEntry.opacity = 255 - Math.floor(parseFloat(layer.$_transparency) * 255);
+        } else if (layer.$_opacity) {
+            layerEntry.opacity = Math.round(parseFloat(layer.$_opacity) * 255);
         } else {
             layerEntry.opacity = 255;
         }
@@ -206,7 +213,7 @@ function getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, co
         }
         if (layer.Style) {
             layerEntry.styles = toArray(layer.Style).reduce((res, entry) => ({...res, [entry.Name]: entry.Title}), {});
-            layerEntry.style = layerEntry.styles.default ? 'default' : (Object.keys(layerEntry)[0] ?? '');
+            layerEntry.style = layerEntry.styles.default ? 'default' : (Object.keys(layerEntry.styles)[0] ?? '');
         }
         if (layer.MinScaleDenominator !== undefined) {
             layerEntry.minScale = Math.round(parseFloat(layer.MinScaleDenominator));
@@ -231,25 +238,25 @@ function getLayerTree(layer, resultLayers, visibleLayers, printLayers, level, co
         layerEntry.dimensions = [];
         toArray(layer.Dimension).forEach(dim => {
             layerEntry.dimensions.push({
-                units: dim.$.units,
-                name: dim.$.name,
-                multiple: dim.$.multipleValues === "1",
+                units: dim.$_units,
+                name: dim.$_name,
+                multiple: dim.$_multipleValues === "1",
                 value: dim._,
-                fieldName: dim.$.fieldName,
-                endFieldName: dim.$.endFieldName
+                fieldName: dim.$_fieldName,
+                endFieldName: dim.$_endFieldName
             });
         });
 
     } else {
         // group
-        layerEntry.mutuallyExclusive = (layer.$ || {}).mutuallyExclusive === '1';
-        if (layer.$.visibilityChecked !== undefined) {
-            layerEntry.visibility = layer.$.visibilityChecked === '1';
+        layerEntry.mutuallyExclusive = layer.$_mutuallyExclusive === '1';
+        if (layer.$_visibilityChecked !== undefined) {
+            layerEntry.visibility = layer.$_visibilityChecked === '1';
         } else {
-            layerEntry.visibility = layer.$.visible === '1';
+            layerEntry.visibility = layer.$_visible === '1';
         }
         layerEntry.sublayers = [];
-        if ((layer.$ || {}).expanded === '0' || (collapseBelowLevel >= 0 && level >= collapseBelowLevel)) {
+        if (layer.$_expanded === '0' || (collapseBelowLevel >= 0 && level >= collapseBelowLevel)) {
             layerEntry.expanded = false;
         } else {
             layerEntry.expanded = true;
@@ -274,6 +281,12 @@ function flatLayers(layer) {
 
 // parse GetCapabilities for theme
 function getTheme(config, configItem, result, resultItem, proxy) {
+    if (configItem.disabled) {
+        /* eslint-disable-next-line no-console */
+        console.log(`Item ${configItem.url}` + (configItem.title ? ` (${configItem.title})` : "") + " has been disabled");
+        return null;
+    }
+
     const parsedUrl = urlUtil.parse(urlUtil.resolve(hostFqdn, configItem.url), true);
     parsedUrl.search = '';
     parsedUrl.query.SERVICE = "WMS";
@@ -284,23 +297,21 @@ function getTheme(config, configItem, result, resultItem, proxy) {
     return new Promise((resolve, reject) => {
         axios.get(getCapabilitiesUrl, {proxy: proxy, auth: configItem.wmsBasicAuth}).then((response) => {
             // parse capabilities
-            let capabilities;
-            xml2js.parseString(
-                response.data, {
-                    tagNameProcessors: [xml2js.processors.stripPrefix],
-                    explicitArray: false
-                },
-                (ignore, parseResult) => {
-                    if (parseResult === undefined || parseResult.WMS_Capabilities === undefined) {
-                        // show response data on parse error
-                        throw new Error(response.data);
-                    } else {
-                        capabilities = parseResult.WMS_Capabilities;
-                    }
-                }
-            );
+            const parseOptions = {
+                removeNSPrefix: true,
+                isArray: () => false,
+                ignoreAttributes: false,
+                attributeNamePrefix: "$_",
+                textNodeName: "_"
+            };
+            const capabilities = (new XMLParser(parseOptions)).parse(response.data)?.WMS_Capabilities;
+            if (capabilities === undefined) {
+                // show response data on parse error
+                throw new Error(response.data);
+            }
 
-            console.log("Parsing WMS GetProjectSettings of " + configItem.url);
+            /* eslint-disable-next-line */
+            console.log("Parsing WMS GetProjectSettings of " + configItem.url + (configItem.title ? ` (${configItem.title})` : ""));
 
             const topLayer = capabilities.Capability.Layer;
             const wmsName = configItem.url.replace(/.*\//, '').replace(/\?^/, '');
@@ -323,12 +334,12 @@ function getTheme(config, configItem, result, resultItem, proxy) {
             const crs = toArray(topLayer.CRS).filter(item => item !== 'CRS:84')[0];
             let extent = [];
             for (const bbox of toArray(topLayer.BoundingBox)) {
-                if (bbox.$.CRS === crs) {
+                if (bbox.$_CRS === crs) {
                     extent = [
-                        parseFloat(bbox.$.minx),
-                        parseFloat(bbox.$.miny),
-                        parseFloat(bbox.$.maxx),
-                        parseFloat(bbox.$.maxy)
+                        parseFloat(bbox.$_minx),
+                        parseFloat(bbox.$_miny),
+                        parseFloat(bbox.$_maxx),
+                        parseFloat(bbox.$_maxy)
                     ];
                     break;
                 }
@@ -366,11 +377,11 @@ function getTheme(config, configItem, result, resultItem, proxy) {
                 const composerTemplateMap = {};
                 for (const composerTemplate of templates) {
                     if (composerTemplate.ComposerMap !== undefined) {
-                        composerTemplateMap[composerTemplate.$.name] = composerTemplate;
+                        composerTemplateMap[composerTemplate.$_name] = composerTemplate;
                     }
                 }
                 Object.values(composerTemplateMap).forEach(composerTemplate => {
-                    const templateName = composerTemplate.$.name;
+                    const templateName = composerTemplate.$_name;
                     if (templateName.endsWith("_legend") && templateName.slice(0, -7) in composerTemplateMap) {
                         return;
                     }
@@ -379,9 +390,9 @@ function getTheme(config, configItem, result, resultItem, proxy) {
                     const printTemplate = {
                         name: templateName,
                         map: {
-                            name: composerMap.$.name,
-                            width: parseFloat(composerMap.$.width),
-                            height: parseFloat(composerMap.$.height)
+                            name: composerMap.$_name,
+                            width: parseFloat(composerMap.$_width),
+                            height: parseFloat(composerMap.$_height)
                         }
                     };
                     if (printTemplate.name + "_legend" in composerTemplateMap) {
@@ -389,18 +400,19 @@ function getTheme(config, configItem, result, resultItem, proxy) {
                     }
                     if (composerTemplate.ComposerLabel !== undefined) {
                         printTemplate.labels = toArray(composerTemplate.ComposerLabel).map((entry) => {
-                            return entry.$.name;
+                            return entry.$_name;
                         }).filter(label => !(configItem.printLabelBlacklist || []).includes(label));
                     }
                     printTemplate.default = configItem.defaultPrintLayout === printTemplate.name;
-                    if (composerTemplate.$.atlasEnabled === '1') {
-                        const atlasLayer = composerTemplate.$.atlasCoverageLayer;
+                    if (composerTemplate.$_atlasEnabled === '1') {
+                        const atlasLayer = composerTemplate.$_atlasCoverageLayer;
                         try {
                             const layers = flatLayers(capabilities.Capability.Layer);
                             const pk = layers.find(l => l.Name === atlasLayer).PrimaryKey.PrimaryKeyAttribute;
                             printTemplate.atlasCoverageLayer = atlasLayer;
                             printTemplate.atlas_pk = pk;
-                        } catch (e) {
+                        } catch {
+                            /* eslint-disable-next-line */
                             console.warn("Failed to determine primary key for atlas layer " + atlasLayer);
                         }
                     }
@@ -413,7 +425,7 @@ function getTheme(config, configItem, result, resultItem, proxy) {
 
             // update theme config
             resultItem.url = configItem.url;
-            resultItem.id = uniqueThemeId(wmsName);
+            resultItem.id = uniqueThemeId(configItem.id || wmsName);
             resultItem.name = topLayer.Name;
             resultItem.title = wmsTitle;
             resultItem.description = configItem.description || "";
@@ -424,7 +436,7 @@ function getTheme(config, configItem, result, resultItem, proxy) {
             // service info
             resultItem.abstract = capabilities.Service.Abstract || "";
             resultItem.keywords = keywords.join(', ');
-            resultItem.onlineResource = capabilities.Service.OnlineResource.$['xlink:href'];
+            resultItem.onlineResource = capabilities.Service.OnlineResource.$_href;
             resultItem.contact = {
                 person: objectPath.get(capabilities, "Service.ContactInformation.ContactPersonPrimary.ContactPerson", ""),
                 organization: objectPath.get(capabilities, "Service.ContactInformation.ContactPersonPrimary.ContactOrganization", ""),
@@ -470,30 +482,28 @@ function getTheme(config, configItem, result, resultItem, proxy) {
             resultItem.searchProviders = configItem.searchProviders;
             resultItem.additionalMouseCrs = configItem.additionalMouseCrs;
             resultItem.mapCrs = configItem.mapCrs || result.themes.defaultMapCrs;
+            resultItem.defaultDisplayCrs = configItem.defaultDisplayCrs;
             if (printTemplates.length > 0) {
                 resultItem.print = printTemplates;
             }
             resultItem.drawingOrder = drawingOrder;
-            if (configItem.extraDxfParameters) {
-                resultItem.extraDxfParameters = configItem.extraDxfParameters;
-            }
             if (configItem.extraPrintParameters) {
                 resultItem.extraPrintParameters = configItem.extraPrintParameters;
             }
             if (configItem.legendUrl) {
                 resultItem.legendUrl = configItem.legendUrl;
             } else {
-                resultItem.legendUrl = capabilities.Capability.Request.GetLegendGraphic.DCPType.HTTP.Get.OnlineResource.$['xlink:href'].replace(/\?$/, "") + "?" + (configItem.extraLegendParameters ? configItem.extraLegendParameters : '');
+                resultItem.legendUrl = capabilities.Capability.Request.GetLegendGraphic.DCPType.HTTP.Get.OnlineResource.$_href.replace(/\?$/, "") + "?" + (configItem.extraLegendParameters ? configItem.extraLegendParameters : '');
             }
             if (configItem.featureInfoUrl) {
                 resultItem.featureInfoUrl = configItem.featureInfoUrl;
             } else {
-                resultItem.featureInfoUrl = capabilities.Capability.Request.GetFeatureInfo.DCPType.HTTP.Get.OnlineResource.$['xlink:href'].replace(/\?$/, "") + "?";
+                resultItem.featureInfoUrl = capabilities.Capability.Request.GetFeatureInfo.DCPType.HTTP.Get.OnlineResource.$_href.replace(/\?$/, "") + "?";
             }
             if (configItem.printUrl) {
                 resultItem.printUrl = configItem.printUrl;
             } else {
-                resultItem.printUrl = capabilities.Capability.Request.GetPrint.DCPType.HTTP.Get.OnlineResource.$['xlink:href'].replace(/\?$/, "") + "?";
+                resultItem.printUrl = capabilities.Capability.Request.GetPrint.DCPType.HTTP.Get.OnlineResource.$_href.replace(/\?$/, "") + "?";
             }
             if (configItem.printLabelForSearchResult) {
                 resultItem.printLabelForSearchResult = configItem.printLabelForSearchResult;
@@ -524,12 +534,19 @@ function getTheme(config, configItem, result, resultItem, proxy) {
             if (configItem.themeInfoLinks) {
                 resultItem.themeInfoLinks = configItem.themeInfoLinks;
             }
+            if (configItem.layerTreeHiddenSublayers) {
+                resultItem.layerTreeHiddenSublayers = configItem.layerTreeHiddenSublayers;
+            }
 
             resultItem.skipEmptyFeatureAttributes = configItem.skipEmptyFeatureAttributes;
             resultItem.config = configItem.config;
             resultItem.flags = configItem.flags;
             resultItem.mapTips = configItem.mapTips;
             resultItem.userMap = configItem.userMap;
+            resultItem.map3d = configItem.map3d;
+            resultItem.obliqueDatasets = configItem.obliqueDatasets;
+            resultItem.viewMode = configItem.viewMode;
+            resultItem.filter = configItem.filter;
             resultItem.editConfig = getEditConfig(configItem.editConfig);
 
             // set default theme
@@ -540,6 +557,7 @@ function getTheme(config, configItem, result, resultItem, proxy) {
             // get thumbnail asynchronously
             getThumbnail(configItem, resultItem, visibleLayers, crs, extent, resolve, proxy);
         }).catch((error) => {
+            /* eslint-disable-next-line */
             console.error("ERROR reading WMS GetProjectSettings of " + configItem.url + ":\n", error);
             resultItem.error = "Could not read GetProjectSettings";
             resultItem.title = "Error";
@@ -556,8 +574,11 @@ const tasks = [];
 function getGroupThemes(config, configGroup, result, resultGroup, proxy, groupCounter) {
     for (const item of configGroup.items) {
         const itemEntry = {};
-        tasks.push(getTheme(config, item, result, itemEntry, proxy));
-        resultGroup.items.push(itemEntry);
+        const task = getTheme(config, item, result, itemEntry, proxy);
+        if (task) {
+            tasks.push(task);
+            resultGroup.items.push(itemEntry);
+        }
     }
 
     if (configGroup.groups !== undefined) {
@@ -565,6 +586,7 @@ function getGroupThemes(config, configGroup, result, resultGroup, proxy, groupCo
             const groupEntry = {
                 id: 'g' + (++groupCounter),
                 title: group.title,
+                titleMsgId: group.titleMsgId,
                 items: [],
                 subdirs: []
             };
@@ -576,7 +598,7 @@ function getGroupThemes(config, configGroup, result, resultGroup, proxy, groupCo
 
 function genThemes(themesConfig) {
     // load themesConfig.json
-    const config = require(process.cwd() + '/' + themesConfig);
+    const config = JSON.parse(fs.readFileSync(process.cwd() + '/' + themesConfig, "utf8"));
 
     const result = {
         themes: {
@@ -585,12 +607,15 @@ function genThemes(themesConfig) {
             items: [],
             defaultTheme: config.defaultTheme,
             defaultMapCrs: config.defaultMapCrs || 'EPSG:3857',
+            defaultDisplayCrs: config.defaultDisplayCrs,
             defaultScales: config.defaultScales,
             defaultPrintScales: config.defaultPrintScales,
             defaultPrintResolutions: config.defaultPrintResolutions,
             defaultPrintGrid: config.defaultPrintGrid,
             defaultSearchProviders: config.defaultSearchProviders,
+            defaultMapTips: config.defaultMapTips,
             defaultBackgroundLayers: config.defaultBackgroundLayers || [],
+            defaultLabelProfiles: config.defaultLabelProfiles,
             externalLayers: config.themes.externalLayers || [],
             pluginData: config.themes.pluginData,
             themeInfoLinks: config.themes.themeInfoLinks,
@@ -639,14 +664,17 @@ function genThemes(themesConfig) {
         // write config file
         fs.writeFile(process.cwd() + '/static/themes.json', JSON.stringify(result, null, 2), (error) => {
             if (error) {
+                /* eslint-disable-next-line */
                 console.error("ERROR:", error);
                 process.exit(1);
             } else {
+                /* eslint-disable-next-line */
                 console.log("\nCreated themes.json\n\n");
             }
         });
 
     }).catch((error) => {
+        /* eslint-disable-next-line */
         console.error("ERROR:", error);
         process.exit(1);
     });
@@ -655,15 +683,16 @@ function genThemes(themesConfig) {
 }
 
 lookup(os.hostname(), { hints: dns.ADDRCONFIG })
-  .then((result) => lookupService(result.address, 0))
-  .then((result) => {
-    hostFqdn = "http://" + result.hostname;
-    console.log("Reading " + themesConfigPath);
+    .then((result) => lookupService(result.address, 0))
+    .then((result) => {
+        hostFqdn = "http://" + result.hostname;
+        /* eslint-disable-next-line */
+        console.log("Reading " + themesConfigPath);
 
-    genThemes(themesConfigPath);
-  })
-  .catch((error) => {
-    process.nextTick(() => {
-      throw error;
+        genThemes(themesConfigPath);
+    })
+    .catch((error) => {
+        process.nextTick(() => {
+            throw error;
+        });
     });
-  });

@@ -1,61 +1,84 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import {v1 as uuidv1} from 'uuid';
-import ol from 'openlayers';
-import isEmpty from 'lodash.isempty';
+import cleanCords from '@turf/clean-coords';
 import geojsonBbox from 'geojson-bounding-box';
-import svgpath from 'svgpath';
-import CoordinatesUtils from '../utils/CoordinatesUtils';
-import ConfigUtils from '../utils/ConfigUtils';
+import isEmpty from 'lodash.isempty';
 import {getDefaultImageStyle} from 'ol/format/KML';
-import {END_MARKERS, computeFeatureStyle} from '../utils/FeatureStyles';
+import ol from 'openlayers';
+import simplepolygon from 'simplepolygon';
+import svgpath from 'svgpath';
+import {v4 as uuidv4} from 'uuid';
+
+import ConfigUtils from '../utils/ConfigUtils';
+import CoordinatesUtils from '../utils/CoordinatesUtils';
+import {END_MARKERS, POINT_SHAPES, computeFeatureStyle} from '../utils/FeatureStyles';
+import MiscUtils from './MiscUtils';
 
 
 const VectorLayerUtils = {
-    createPrintHighlighParams(layers, printCrs, printScale, dpi = 96, scaleFactor = 1.0) {
-        const qgisServerVersion = ConfigUtils.getConfigProp("qgisServerVersion") || 3;
+    createPrintHighlighParams(layers, printCrs, mapScale, dpi = 96, scaleFactor = 1.0) {
+        const qgisServerVersion = ConfigUtils.getConfigProp("qgisServerVersion", null, 3);
         const params = {
             geoms: [],
             styles: [],
             labels: [],
             labelFillColors: [],
-            labelOultineColors: [],
+            labelOutlineColors: [],
             labelOutlineSizes: [],
+            labelRotations: [],
             labelSizes: [],
-            labelDist: []
+            labelDist: [],
+            labelFrameColors: [],
+            labelFrameOutlines: [],
+            labelFrameOutlineWidths: [],
+            labelFrameSizes: []
         };
         let ensureHex = null;
+        let ensureHexRgb = null;
         if (qgisServerVersion >= 3) {
-            ensureHex = (rgb) => (!Array.isArray(rgb) ? rgb : '#' + [255 - (rgb.length > 3 ? rgb[3] : 1) * 255, ...rgb.slice(0, 3)].map(v => v.toString(16).padStart(2, '0')).join(''));
+            ensureHex = (rgba) => (!Array.isArray(rgba) ? rgba : '#' + [255 - (rgba.length > 3 ? rgba[3] : 1) * 255, ...rgba.slice(0, 3)].map(v => Math.round(v).toString(16).padStart(2, '0')).join(''));
+            ensureHexRgb = (rgb) => (!Array.isArray(rgb) ? rgb : '#' + [...rgb.slice(0, 3)].map(v => Math.round(v).toString(16).padStart(2, '0')).join(''));
         } else {
-            ensureHex = (rgb) => (!Array.isArray(rgb) ? rgb : ('#' + (0x1000000 + (rgb[2] | (rgb[1] << 8) | (rgb[0] << 16))).toString(16).slice(1)));
+            ensureHexRgb = ensureHex = (rgb) => (!Array.isArray(rgb) ? rgb : ('#' + (0x1000000 + (rgb[2] | (rgb[1] << 8) | (rgb[0] << 16))).toString(16).slice(1)));
         }
 
         for (const layer of layers.slice(0).reverse()) {
             if (layer.type !== 'vector' || (layer.features || []).length === 0 || layer.visibility === false || layer.skipPrint === true) {
                 continue;
             }
-            for (const feature of layer.features) {
+            const features = layer.features.map(feature => {
+                if (feature.geometry?.coordinates) {
+                    feature = {...feature, geometry: {...feature.geometry, coordinates: VectorLayerUtils.removeDuplicateNodes(feature.geometry.coordinates)}};
+                }
+                try {
+                    return VectorLayerUtils.simplifyFeature(feature);
+                } catch {
+                    /* eslint-disable-next-line */
+                    console.warn("Skipping invalid geometry");
+                    return null;
+                }
+            }).filter(Boolean).flat();
+            for (const feature of features) {
                 if (!VectorLayerUtils.validateGeometry(feature.geometry)) {
                     continue;
                 }
-                const styleOptions = computeFeatureStyle(feature);
+                const styleOptions = computeFeatureStyle(layer, feature);
 
                 const properties = feature.properties || {};
-                let geometry = VectorLayerUtils.reprojectGeometry(feature.geometry, feature.crs || printCrs, printCrs);
+                const geometry = VectorLayerUtils.reprojectGeometry(feature.geometry, feature.crs || printCrs, printCrs);
                 if (feature.geometry.type === "LineString") {
                     // Generate arrow heads
                     if (styleOptions.headmarker) {
-                        VectorLayerUtils.generateMarkerGeometry(params, styleOptions.headmarker, false, feature, layer, dpi, printScale, printCrs, scaleFactor);
+                        VectorLayerUtils.generateMarkerGeometry(params, styleOptions.headmarker, false, feature, layer, mapScale, dpi, scaleFactor);
                     }
                     if (styleOptions.tailmarker) {
-                        VectorLayerUtils.generateMarkerGeometry(params, styleOptions.tailmarker, true, feature, layer, dpi, printScale, printCrs, scaleFactor);
+                        VectorLayerUtils.generateMarkerGeometry(params, styleOptions.tailmarker, true, feature, layer, mapScale, dpi, scaleFactor);
                     }
                 }
                 if (feature.geometry.type === "LineString" && !isEmpty(properties.segment_labels)) {
@@ -68,66 +91,188 @@ const VectorLayerUtils = {
                         };
                         params.styles.push(VectorLayerUtils.createSld(segment.type, feature.styleName, styleOptions, layer.opacity, dpi, scaleFactor));
                         params.labels.push(properties.segment_labels[i] || " ");
-                        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(segment, printCrs === "EPSG:4326" ? 4 : 2));
-                        params.labelFillColors.push(styleOptions.textFill);
-                        params.labelOultineColors.push(styleOptions.textStroke);
+                        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(segment));
+                        params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                        params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
                         params.labelOutlineSizes.push(scaleFactor);
                         params.labelSizes.push(Math.round(10 * scaleFactor));
                         params.labelDist.push("-5");
+                        params.labelRotations.push("0");
+                        params.labelFrameColors.push("white");
+                        params.labelFrameOutlines.push("white");
+                        params.labelFrameOutlineWidths.push("0");
+                        params.labelFrameSizes.push("0");
+
                     }
+                } else if (feature.styleName === "text" || feature.styleName === "textlabel") {
+                    const x = geometry.coordinates[0];
+                    const y = geometry.coordinates[1];
+                    if (feature.styleName === "textlabel") {
+                        if (qgisServerVersion < 4) {
+                            // QGIS 3.x fallback for label frame
+                            const metrics = MiscUtils.measureText(feature.properties.label, `10pt sans`);
+                            const scale = styleOptions.strokeWidth * scaleFactor;
+                            const mapWidth = CoordinatesUtils.pixelsToMapUnits((metrics.width + 12) * scale, 100, mapScale, printCrs);
+                            const mapHeight = CoordinatesUtils.pixelsToMapUnits((metrics.height + 12) * scale, 100, mapScale, printCrs);
+                            const frame = {
+                                type: "Polygon",
+                                coordinates: [[
+                                    [x - 0.5 * mapWidth, y - 0.5 * mapHeight],
+                                    [x + 0.5 * mapWidth, y - 0.5 * mapHeight],
+                                    [x + 0.5 * mapWidth, y + 0.5 * mapHeight],
+                                    [x - 0.5 * mapWidth, y + 0.5 * mapHeight],
+                                    [x - 0.5 * mapWidth, y - 0.5 * mapHeight]
+                                ]]
+                            };
+                            params.styles.push(VectorLayerUtils.createSld("Polygon", "default", {strokeColor: styleOptions.strokeColor, strokeWidth: styleOptions.strokeWidth, fillColor: styleOptions.fillColor}, layer.opacity, dpi, scaleFactor));
+                            params.labels.push(" ");
+                            params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(frame));
+                            params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                            params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
+                            params.labelOutlineSizes.push("0");
+                            params.labelSizes.push("1");
+                            params.labelDist.push("0");
+                            params.labelRotations.push("0");
+                        }
+
+                        if (x !== styleOptions.anchor[0] && y !== styleOptions.anchor[1]) {
+                            // Draw leader line
+                            params.styles.push(VectorLayerUtils.createSld("LineString", "default", {strokeColor: styleOptions.strokeColor, strokeWidth: styleOptions.strokeWidth}, layer.opacity, dpi, scaleFactor));
+                            params.labels.push(" ");
+                            params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt({type: "LineString", coordinates: [[x, y], styleOptions.anchor]}));
+                            params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                            params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
+                            params.labelOutlineSizes.push("0");
+                            params.labelSizes.push("1");
+                            params.labelDist.push("0");
+                            params.labelRotations.push("0");
+                            params.labelFrameColors.push("white");
+                            params.labelFrameOutlines.push("white");
+                            params.labelFrameOutlineWidths.push(0);
+                            params.labelFrameSizes.push(0);
+                        }
+                    }
+                    // Make point a tiny square, so that QGIS server centers the text inside the polygon when labelling
+                    const square = {
+                        type: "Polygon",
+                        coordinates: [[
+                            [x - 0.01, y - 0.01],
+                            [x + 0.01, y - 0.01],
+                            [x + 0.01, y + 0.01],
+                            [x - 0.01, y + 0.01],
+                            [x - 0.01, y - 0.01]
+                        ]]
+                    };
+                    params.styles.push(VectorLayerUtils.createSld(square.type, feature.styleName, styleOptions, 0, dpi, scaleFactor));
+                    params.labels.push(properties.label || " ");
+                    params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(square));
+                    if (feature.styleName === "textlabel") {
+                        // QGIS 4.x label frame
+                        params.labelFillColors.push(ensureHex(styleOptions.strokeColor));
+                        params.labelOutlineColors.push(ensureHex(MiscUtils.isBrightColor(styleOptions.strokeColor) ? "#333" : "#FFF"));
+                        params.labelFrameColors.push(ensureHexRgb(styleOptions.fillColor));
+                        params.labelFrameOutlines.push(ensureHexRgb(styleOptions.strokeColor));
+                        params.labelFrameOutlineWidths.push(styleOptions.strokeWidth * 0.25);
+                        params.labelFrameSizes.push(qgisServerVersion >= 4 ? 2 : 0);
+                    } else {
+                        params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                        params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
+                        params.labelFrameColors.push("white");
+                        params.labelFrameOutlines.push("white");
+                        params.labelFrameOutlineWidths.push(0);
+                        params.labelFrameSizes.push(0);
+                    }
+                    params.labelOutlineSizes.push(scaleFactor * styleOptions.strokeWidth * 0.5);
+                    params.labelSizes.push(Math.round(10 * styleOptions.strokeWidth * scaleFactor));
+                    params.labelDist.push("5");
+                    params.labelRotations.push(((properties.rotation || 0) / Math.PI * 180).toFixed(0));
                 } else {
                     params.styles.push(VectorLayerUtils.createSld(geometry.type, feature.styleName, styleOptions, layer.opacity, dpi, scaleFactor));
                     params.labels.push(properties.label || " ");
-                    if (feature.styleName === "text") {
-                        // Make point a tiny square, so that QGIS server centers the text inside the polygon when labelling
-                        const x = geometry.coordinates[0];
-                        const y = geometry.coordinates[1];
-                        geometry = {
-                            type: "Polygon",
-                            coordinates: [[
-                                [x - 0.01, y - 0.01],
-                                [x + 0.01, y - 0.01],
-                                [x + 0.01, y + 0.01],
-                                [x - 0.01, y + 0.01],
-                                [x - 0.01, y - 0.01]
-                            ]]
-                        };
-                        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(geometry, printCrs === "EPSG:4326" ? 4 : 2));
-                        params.labelFillColors.push(ensureHex(styleOptions.fillColor));
-                        params.labelOultineColors.push(ensureHex(styleOptions.strokeColor));
-                        params.labelOutlineSizes.push(scaleFactor * styleOptions.strokeWidth * 0.5);
-                        params.labelSizes.push(Math.round(10 * styleOptions.strokeWidth * scaleFactor));
-                        params.labelDist.push("5");
-                    } else {
-                        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(geometry, printCrs === "EPSG:4326" ? 4 : 2));
-                        params.labelFillColors.push(styleOptions.textFill);
-                        params.labelOultineColors.push(styleOptions.textStroke);
+                    params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(geometry));
+                    params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                    params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
+                    params.labelOutlineSizes.push(scaleFactor);
+                    params.labelSizes.push(Math.round(10 * scaleFactor));
+                    params.labelDist.push("-5");
+                    params.labelRotations.push("0");
+                    params.labelFrameColors.push("white");
+                    params.labelFrameOutlines.push("white");
+                    params.labelFrameOutlineWidths.push(0);
+                    params.labelFrameSizes.push(0);
+                }
+                if (properties.end_label) {
+                    const coo = geometry.coordinates;
+                    let point = null;
+                    if (feature.geometry.type === "LineString") {
+                        point = coo[coo.length - 1];
+                    } else if (feature.geometry.type === "Polygon") {
+                        point = coo[0].reduce((min, p) => p[1] < min[1] ? p : min, [Infinity, Infinity]);
+                    }
+                    if (point) {
+                        // Add extra endpoint with label
+                        params.styles.push(VectorLayerUtils.createSld('Point', 'text', {}, 255, dpi, scaleFactor));
+                        params.labels.push(properties.end_label);
+                        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt({type: "Point", coordinates: point}));
+                        params.labelFillColors.push(ensureHex(styleOptions.textFill));
+                        params.labelOutlineColors.push(ensureHex(styleOptions.textStroke));
                         params.labelOutlineSizes.push(scaleFactor);
                         params.labelSizes.push(Math.round(10 * scaleFactor));
                         params.labelDist.push("-5");
+                        params.labelRotations.push("0");
+                        params.labelFrameColors.push("white");
+                        params.labelFrameOutlines.push("white");
+                        params.labelFrameOutlineWidths.push(0);
+                        params.labelFrameSizes.push(0);
                     }
                 }
             }
         }
         return params;
     },
+    removeDuplicateNodes(coordinates) {
+        if (Array.isArray(coordinates[0][0])) {
+            return coordinates.map(VectorLayerUtils.removeDuplicateNodes);
+        } else if (Array.isArray(coordinates[0])) {
+            return coordinates.filter((item, pos, arr) => {
+                return pos === 0 || item[0] !== arr[pos - 1][0] || item[1] !== arr[pos - 1][1];
+            });
+        } else {
+            return coordinates;
+        }
+    },
+    simplifyFeature(feature) {
+        if (!feature.geometry) {
+            return feature;
+        } else if (feature.geometry.type === "MultiPolygon") {
+            return feature.geometry.coordinates.map(part => {
+                return VectorLayerUtils.simplifyFeature({
+                    ...feature,
+                    geometry: {type: "Polygon", coordinates: part}
+                });
+            }).flat();
+        } else if (feature.geometry.type === "Polygon") {
+            return simplepolygon(cleanCords(feature)).features.map((feat, idx, features) => {
+                if (feat.properties.parent >= 0) {
+                    features[feat.properties.parent].geometry.coordinates.push(feat.geometry.coordinates[0]);
+                    return null;
+                }
+                return feat;
+            }).filter(x => x).map(feat => ({...feature, geometry: feat.geometry}));
+        } else {
+            return feature;
+        }
+    },
     validateGeometry(geometry) {
         if (!geometry) {
             return false;
         }
+        if (geometry.type === "GeometryCollection") {
+            return geometry.geometries.every(VectorLayerUtils.validateGeometry);
+        }
         if (geometry.type === "Point") {
             return !isEmpty(geometry.coordinates);
         }
-        const removeDuplicates = (coordinates) => {
-            if (Array.isArray(coordinates[0][0])) {
-                return coordinates.map(removeDuplicates);
-            } else {
-                return coordinates.filter((item, pos, arr) => {
-                    return pos === 0 || item[0] !== arr[pos - 1][0] || item[1] !== arr[pos - 1][1];
-                });
-            }
-        };
-        const cleanCoordinates = removeDuplicates(geometry.coordinates);
         const minLength = geometry.type.endsWith("LineString") ? 2 : 3;
         const isDegenerate = (coordinates) => {
             if (Array.isArray(coordinates[0][0])) {
@@ -136,29 +281,30 @@ const VectorLayerUtils = {
                 return coordinates.length < minLength;
             }
         };
-        return !isDegenerate(cleanCoordinates);
+        return !isDegenerate(geometry.coordinates);
     },
     createSld(geometrytype, styleName, styleOptions, layerOpacity, dpi = 96, scaleFactor = 1.0) {
         let opts = {};
+        const dpiScale = dpi / 96 * scaleFactor;
         // Special cases
         if (styleName === 'text') {
             // Make geometry transparent
             opts = {
                 strokeColor: [0, 0, 0, 0],
-                fillColor: [0, 0, 0, 0]
+                fillColor: [0, 0, 0, 0],
+                strokeWidth: 0
             };
         } else if (styleName === 'marker') {
             opts = {
                 strokeColor: [0, 0, 255, 1],
-                strokeWidth: 4,
+                strokeWidth: 1 * dpiScale,
                 fillColor: [255, 255, 255, 1],
-                circleRadius: 6
+                circleRadius: 2 * dpiScale
             };
         } else {
             // Default style
             opts = styleOptions;
         }
-        const dpiScale = dpi / 96 * scaleFactor;
 
         const ensureHex = (rgb) => (!Array.isArray(rgb) ? rgb : ('#' + (0x1000000 + (rgb[2] | (rgb[1] << 8) | (rgb[0] << 16))).toString(16).slice(1)));
         const opacity =  (rgb) => {
@@ -173,7 +319,8 @@ const VectorLayerUtils = {
                      '<se:SvgParameter name="stroke-opacity">' + opacity(opts.strokeColor) + '</se:SvgParameter>' +
                      '<se:SvgParameter name="stroke-width">' + (opts.strokeWidth * dpiScale) + '</se:SvgParameter>' +
                      '<se:SvgParameter name="stroke-linejoin">round</se:SvgParameter>' +
-                     (!isEmpty(opts.strokeDash) ? '<CssParameter name="stroke-dasharray">' + opts.strokeDash.join(' ') + '</CssParameter>' : '') +
+                     '<se:SvgParameter name="stroke-linecap">butt</se:SvgParameter>' +
+                     (!isEmpty(opts.strokeDash) ? '<se:SvgParameter name="stroke-dasharray">' + opts.strokeDash.map(x => x * dpiScale).join(' ') + '</se:SvgParameter>' : '') +
                      '</se:Stroke>';
         const fill = '<se:Fill>' +
                    '<se:SvgParameter name="fill">' + ensureHex(opts.fillColor) + '</se:SvgParameter>' +
@@ -182,14 +329,17 @@ const VectorLayerUtils = {
 
         let rule = null;
         if (geometrytype.endsWith("Point")) {
+            // POINT_SHAPES keys are valid SLD WellKnownNames, but validate before interpolating into XML
+            const wellKnownName = Object.hasOwn(POINT_SHAPES, opts.pointShape) ? opts.pointShape : 'circle';
             rule = '<se:PointSymbolizer>' +
                    '<se:Graphic>' +
                    '<se:Mark>' +
-                   '<se:WellKnownName>circle</se:WellKnownName>' +
+                   '<se:WellKnownName>' + wellKnownName + '</se:WellKnownName>' +
                    '<se:Stroke>' +
                    '<se:SvgParameter name="stroke">' + ensureHex(opts.strokeColor) + '</se:SvgParameter>' +
                    '<se:SvgParameter name="stroke-opacity">' + opacity(opts.strokeColor) + '</se:SvgParameter>' +
                    '<se:SvgParameter name="stroke-width">' + (opts.strokeWidth * dpiScale) + '</se:SvgParameter>' +
+                   '<se:SvgParameter name="stroke-linejoin">round</se:SvgParameter>' +
                    '</se:Stroke>' +
                    fill +
                    '</se:Mark>' +
@@ -220,7 +370,7 @@ const VectorLayerUtils = {
         }
         return null;
     },
-    generateMarkerGeometry(params, markername, tail, feature, layer, dpi, mapScale, printCrs, scaleFactor) {
+    generateMarkerGeometry(params, markername, tail, feature, layer, mapScale, dpi, scaleFactor) {
         if (!END_MARKERS[markername]) {
             return;
         }
@@ -236,13 +386,14 @@ const VectorLayerUtils = {
             width = parseInt(svgDoc.getElementsByTagName("svg")[0].getAttribute("width"), 10);
             height = parseInt(svgDoc.getElementsByTagName("svg")[0].getAttribute("height"), 10);
             path = svgDoc.getElementsByTagName("path")[0].getAttribute("d");
-        } catch (e) {
+        } catch {
             /* eslint-disable-next-line */
             console.warn("Could not parse path for marker " + markername);
             return;
         }
-        //                        [        Same as in FeatureStyles.js         ] [   pixel to map units  ]
-        const markerScaleFactor = 0.125 * (1 + feature.styleOptions.strokeWidth) / dpi * 0.0254 * mapScale * scaleFactor;
+        const opts = feature.styleOptions;
+        //                        [              Same as in FeatureStyles.js             ]   [   pixel to map units  ]
+        const markerScaleFactor = 0.125 * (1 + opts.strokeWidth) * (opts.markerscale ?? 1) / dpi * 0.0254 * mapScale * scaleFactor;
         const origin = feature.geometry.coordinates[tail ? feature.geometry.coordinates.length - 1 : 0];
         const p2 = feature.geometry.coordinates[tail ? feature.geometry.coordinates.length - 2 : 1];
         const coordinates = [];
@@ -275,10 +426,10 @@ const VectorLayerUtils = {
         };
 
         params.styles.push(VectorLayerUtils.createSld(geometry.type, "default", styleOptions, layer.opacity, dpi, scaleFactor));
-        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(geometry, printCrs === "EPSG:4326" ? 4 : 2));
+        params.geoms.push(VectorLayerUtils.geoJSONGeomToWkt(geometry));
         params.labels.push(" ");
         params.labelFillColors.push("#FFF");
-        params.labelOultineColors.push("#FFF");
+        params.labelOutlineColors.push("#FFF");
         params.labelOutlineSizes.push(scaleFactor);
         params.labelSizes.push(Math.round(10 * scaleFactor));
         params.labelDist.push("0");
@@ -324,7 +475,23 @@ const VectorLayerUtils = {
             return geometry;
         }
     },
-    wktToGeoJSON(wkt, srccrs, dstcrs, id = uuidv1()) {
+    reprojectFeature(feature, srccrs, dstcrs) {
+        if (srccrs === dstcrs || !srccrs || !dstcrs) {
+            return feature;
+        }
+        if (feature.features) {
+            return {
+                ...feature,
+                features: feature.features.map(f => VectorLayerUtils.reprojectFeature(srccrs, dstcrs))
+            };
+        } else {
+            return {
+                ...feature,
+                geometry: VectorLayerUtils.reprojectGeometry(feature.geometry, srccrs, dstcrs)
+            };
+        }
+    },
+    wktToGeoJSON(wkt, srccrs, dstcrs, id = uuidv4()) {
         wkt = wkt
             .replace(/Point(\w+)/i, "Point $1")
             .replace(/LineString(\w+)/i, "LineString $1")
@@ -338,13 +505,16 @@ const VectorLayerUtils = {
             const featureObj = new ol.format.GeoJSON().writeFeatureObject(feature);
             featureObj.id = id;
             return featureObj;
-        } catch (e) {
+        } catch {
             /* eslint-disable-next-line */
             console.warn("Failed to parse geometry: " + wkt);
             return null;
         }
     },
-    geoJSONGeomToWkt(gj, precision = 4) {
+    geoJSONGeomToWkt(gj, precision = undefined) {
+        if (precision === undefined) {
+            precision = ConfigUtils.getConfigProp("wmsWktPrecision", null, 4);
+        }
         if (gj.type === 'Feature') {
             gj = gj.geometry;
         }
@@ -407,9 +577,9 @@ const VectorLayerUtils = {
             }
             const feature = geojsonFormat.writeFeatureObject(olFeature);
             Object.assign(feature, {
-                styleName: styleOptions.iconSrc ? 'marker' : 'default',
+                styleName: styleOptions.iconSrc && feature.geometry?.type === "Point" ? 'marker' : 'default',
                 styleOptions: styleOptions,
-                id: uuidv1(),
+                id: uuidv4(),
                 crs: "EPSG:4326",
                 properties: {}
             });
@@ -445,12 +615,16 @@ const VectorLayerUtils = {
             }
         });
         const bboxCrs = featureCrs.size === 1 ? [...featureCrs.keys()][0] : "EPSG:4326";
+        const collectionFeatures = features.filter(feature => feature.geometry).map(feature => ({
+            ...feature,
+            geometry: feature.crs ? VectorLayerUtils.reprojectGeometry(feature.geometry, feature.crs, bboxCrs) : feature.geometry
+        }));
+        if (isEmpty(collectionFeatures)) {
+            return null;
+        }
         let bounds = geojsonBbox({
             type: "FeatureCollection",
-            features: features.filter(feature => feature.geometry).map(feature => ({
-                ...feature,
-                geometry: feature.crs ? VectorLayerUtils.reprojectGeometry(feature.geometry, feature.crs, bboxCrs) : feature.geometry
-            }))
+            features: collectionFeatures
         });
         // Discard z component
         if (bounds.length === 6) {

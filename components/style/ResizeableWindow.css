@@ -1,16 +1,30 @@
 div.resizeable-window-container {
     position: absolute;
-    left: 0;
-    top: 3.5em;
-    bottom: 2.25em;
-    right: 0;
     pointer-events: none;
 }
+
 div.resizeable-window {
     pointer-events: auto;
     background-color: var(--container-bg-color);
     box-shadow: 0px 0px 8px rgba(0, 0, 0, 0.75);
     z-index: 8;
+    border-radius: var(--border-radius);
+}
+
+div.resizeable-window-portal-container,
+div.resizeable-window-portal-container > div {
+    height: 100%;
+}
+
+div.resizeable-window-portal-container {
+    padding: 0.25em;
+    background-color: var(--container-bg-color);
+}
+
+div.resizeable-window-contents {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
 div.resizeable-window-maximized {
@@ -26,6 +40,10 @@ div.resizeable-window-maximized {
 div.resizeable-window-minimized {
     height: 2.5em!important;
     min-height: 2.5em!important;
+}
+
+div.resizeable-window-minimized div.resizeable-window-body {
+    padding: 0;
 }
 
 div.resizeable-window-docked-left {
@@ -84,18 +102,29 @@ div.resizeable-window-docked-bottom {
     max-width: initial!important;
 }
 
+div.resizeable-window-fit-height {
+    height: initial!important;
+}
+
 div.resizeable-window-titlebar {
     color: var(--titlebar-text-color);
     background-color: var(--titlebar-bg-color);
-    height: 2.5em;
+    flex: 0 0 2.5em;
     display: flex;
     align-items: center;
-    -moz-user-select: none;
-    -webkit-user-select: none;
-    -ms-user-select: none;
-    user-select: none;
-    padding: 0 0.25em;
+    padding: 0 0.5em;
+    border-radius: var(--border-radius) var(--border-radius) 0px 0px;
+}
+
+div.resizeable-window-titlebar > div.spinner {
     flex: 0 0 auto;
+    margin-right: 0.25em;
+    width: 1.5em;
+    height: 1.5em;
+}
+
+div.resizeable-window-titlebar > div.spinner > div {
+    background-color: var(--titlebar-text-color);
 }
 
 span.resizeable-window-titlebar-icon {
@@ -117,14 +146,10 @@ span.resizeable-window-titlebar-control {
     font-size: large;
 }
 
-span.resizeable-window-titlebar-extra-controls {
-    margin-right: 0.5em;
-}
-
 span.resizeable-window-titlebar-extra-control {
     flex: 0 0 auto;
-    padding: 0.25em;
-    margin: 0 1px;
+    margin-right: 0.25em;
+    font-size: large;
 }
 
 span.resizeable-window-titlebar-extra-control-active {
@@ -133,12 +158,12 @@ span.resizeable-window-titlebar-extra-control-active {
 }
 
 div.resizeable-window-body {
-    padding: 0.25em;
     overflow: hidden;
-    height: calc(100% - 2.5em);
+    flex: 1 1 auto;
     cursor: default;
     flex: 1 1 auto;
     position: relative;
+    border-radius: 0px 0px var(--border-radius) var(--border-radius);
 }
 
 div.dock-window > div.resizeable-window-body {

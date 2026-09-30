@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,31 +8,51 @@
 
 
 import React from 'react';
-import axios from 'axios';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import {v1 as uuidv1} from 'uuid';
+
+import axios from 'axios';
 import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+import {v4 as uuidv4} from 'uuid';
+
+import {LayerRole, changeLayerProperty} from '../actions/layers';
+import {zoomToExtent} from '../actions/map';
+import Icon from '../components/Icon';
 import IdentifyViewer from '../components/IdentifyViewer';
 import SideBar from '../components/SideBar';
-import Spinner from '../components/Spinner';
-import CoordinatesUtils from '../utils/CoordinatesUtils';
+import InputContainer from '../components/widgets/InputContainer';
+import Spinner from '../components/widgets/Spinner';
 import IdentifyUtils from '../utils/IdentifyUtils';
+import LayerUtils from '../utils/LayerUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MapUtils from '../utils/MapUtils';
+import {QgisSearch} from '../utils/SearchProviders';
+import VectorLayerUtils from '../utils/VectorLayerUtils';
+
 import "./style/FeatureSearch.css";
 
 
 /**
  * Displays a dialog with a search form for configured QGIS feature searches with one or more input fields.
+ *
+ * See [Configuring the QGIS feature search](../../topics/Search/#configuring-the-qgis-feature-search).
  */
 class FeatureSearch extends React.Component {
     static propTypes = {
+        changeLayerProperty: PropTypes.func,
+        /** Whether to enable the export functionality. Either `true|false` or a list of single allowed formats (builtin formats: `json`, `geojson`, `csv`, `csvzip`, `shapefile`, `xlsx`). If a list is provided, the export formats will be sorted according to that list, and the default format will be the first format of the list. */
+        enableExport: PropTypes.oneOfType([PropTypes.bool, PropTypes.array]),
+        layers: PropTypes.array,
         map: PropTypes.object,
+        /** Show zoom to all results button. */
+        showZoomToResults: PropTypes.bool,
         /** The side of the application on which to display the sidebar. */
         side: PropTypes.string,
-        theme: PropTypes.object
+        theme: PropTypes.object,
+        zoomToExtent: PropTypes.func
     };
     static defaultProps = {
+        enableExport: true,
         side: 'right'
     };
     state = {
@@ -40,14 +60,16 @@ class FeatureSearch extends React.Component {
         searchProviders: {},
         providerGroups: {},
         selectedProvider: '',
+        formValues: {},
+        providerSelectOptions: {},
         searchResults: null
     };
-    componentDidUpdate(prevProps) {
+    componentDidUpdate(prevProps, prevState) {
         if (this.props.theme !== prevProps.theme) {
             let defaultProvider = '';
             const providerGroups = {};
             const searchProviders = (this.props.theme?.searchProviders || []).reduce((res, entry) => {
-                if (entry.provider === "qgis" && entry.params) {
+                if (entry.provider === "qgis" && entry.params && entry.params.featuresearch !== false) {
                     const providerDef = {...entry};
                     if (!providerDef.params.fields) {
                         providerDef.params = {...providerDef.params};
@@ -58,7 +80,7 @@ class FeatureSearch extends React.Component {
                     if (providerDef.params.titlemsgid) {
                         providerDef.params.title = LocaleUtils.tr(providerDef.params.titlemsgid);
                     }
-                    const providerId = uuidv1();
+                    const providerId = uuidv4();
                     res[providerId] = providerDef;
                     if (providerDef.params.default) {
                         defaultProvider = providerId;
@@ -77,6 +99,15 @@ class FeatureSearch extends React.Component {
             }, {});
             this.setState({searchProviders: searchProviders, selectedProvider: defaultProvider, providerGroups: sortedProviderGroups});
         }
+        if (this.state.selectedProvider !== prevState.selectedProvider) {
+            this.setState(state => ({
+                formValues: Object.entries(state.searchProviders[state.selectedProvider]?.params?.fields || []).reduce((res, [field, cfg]) => {
+                    return {...res, [field]: ""};
+                }, {})
+            }));
+        } else if (this.state.formValues !== prevState.formValues) {
+            this.reloadSelectOptions();
+        }
     }
     onHide = () => {
         this.setState({searchResults: null});
@@ -84,7 +115,7 @@ class FeatureSearch extends React.Component {
     render() {
         return (
             <SideBar icon="search" id="FeatureSearch" onHide={this.onHide} side={this.props.side}
-                title={LocaleUtils.trmsg("featuresearch.title")} width="20em">
+                title={LocaleUtils.tr("featuresearch.title")} width="20em">
                 {() => ({
                     body: this.renderBody()
                 })}
@@ -96,7 +127,7 @@ class FeatureSearch extends React.Component {
             <div className="feature-search-body">
                 <div className="feature-search-selection">
                     <select onChange={this.selectProvider} value={this.state.selectedProvider}>
-                        <option disabled value="">{LocaleUtils.tr("featuresearch.select")}</option>
+                        <option disabled value="">{LocaleUtils.tr("common.select")}</option>
                         {Object.entries(this.state.providerGroups).map(([group, entries]) => {
                             return [
                                 group !== '' ? (<option disabled key={group} value={group}>{group}</option>) : null,
@@ -119,15 +150,18 @@ class FeatureSearch extends React.Component {
         if (!provider) {
             return null;
         }
+        const fields = Object.entries(provider.params.fields).map(([key, value], idx) => (
+            {key, ...value, order: value.order ?? idx}
+        )).sort((a, b) => a.order - b.order);
         return (
             <form className="feature-search-form" disabled={this.state.busy} onChange={() => this.setState({searchResults: null})} onSubmit={this.search}>
                 <fieldset disabled={this.state.busy}>
                     {provider.params.description ? (<div className="feature-search-form-descr">{provider.params.description}</div>) : null}
                     <table><tbody>
-                        {Object.entries(provider.params.fields).map(([key, value]) => (
-                            <tr key={key}>
-                                <td>{value.label || LocaleUtils.tr(value.labelmsgid)}:</td>
-                                <td>{this.renderField(key, value)}</td>
+                        {fields.map(field => (
+                            <tr key={field.key}>
+                                <td>{field.label ?? LocaleUtils.tr(field.labelmsgid)}:</td>
+                                <td>{this.renderField(field.key, field)}</td>
                             </tr>
                         ))}
                     </tbody></table>
@@ -142,16 +176,33 @@ class FeatureSearch extends React.Component {
         );
     };
     renderField = (fieldname, fieldcfg) => {
+        const onChange = ev => this.setState(state => ({formValues: {...state.formValues, [fieldname]: ev.target.value}}));
         if (fieldcfg.type === "select") {
+            const options = this.state.providerSelectOptions[fieldname]?.options ?? fieldcfg.options ?? [];
             return (
-                <select name={fieldname}>
-                    {fieldcfg.options.map(entry => (
-                        <option key={entry.value ?? entry} value={entry.value ?? entry}>{entry.label ?? entry}</option>
-                    ))}
-                </select>
+                <InputContainer>
+                    <select defaultValue="" name={fieldname} onChange={onChange} role="input">
+                        <option disabled value="">{LocaleUtils.tr("common.select")}</option>
+                        {options.map(entry => (
+                            <option key={entry.value ?? entry} value={entry.value ?? entry}>{entry.label ?? (entry.labelmsgid ? LocaleUtils.tr(entry.labelmsgid) : entry)}</option>
+                        ))}
+                    </select>
+                    <Icon icon="clear" onClick={(ev) => this.clearField(ev, fieldname)} role="suffix" />
+                </InputContainer>
+            );
+        } else if (fieldcfg.type === "checkbox") {
+            return (
+                <InputContainer>
+                    <select defaultValue="" name={fieldname} onChange={onChange} role="input">
+                        <option value="">{LocaleUtils.tr("common.select")}</option>
+                        <option value="true">{LocaleUtils.tr("common.true")}</option>
+                        <option value="false">{LocaleUtils.tr("common.false")}</option>
+                    </select>
+                    <Icon icon="clear" onClick={(ev) => this.clearField(ev, fieldname)} role="suffix" />
+                </InputContainer>
             );
         } else {
-            return (<input name={fieldname} type={fieldcfg.type || "text"} {...fieldcfg.options} />);
+            return (<input name={fieldname} onChange={onChange} type={fieldcfg.type || "text"} {...fieldcfg.options} />);
         }
     };
     renderSearchResults = () => {
@@ -162,15 +213,20 @@ class FeatureSearch extends React.Component {
         return (
             <div className="feature-search-results">
                 {isEmpty(this.state.searchResults) ? (
-                    <div className="feature-search-noresults">{LocaleUtils.tr("featuresearch.noresults")}</div>
+                    <div className="feature-search-noresults">{LocaleUtils.tr("common.noresults")}</div>
                 ) : (
-                    <IdentifyViewer collapsible displayResultTree={false} enableExport identifyResults={this.state.searchResults} showLayerTitles={!provider.params.resultTitle} />
+                    <IdentifyViewer
+                        collapsible displayResultTree={false} enableExport={this.props.enableExport}
+                        identifyResults={this.state.searchResults}
+                        resultsChanged={results => this.setState({searchResults: results})}
+                        showLayerTitles={!provider.params.resultTitle}
+                        showZoomToResults={this.props.showZoomToResults} />
                 )}
             </div>
         );
     };
     selectProvider = (ev) => {
-        this.setState({selectedProvider: ev.target.value, searchResults: null});
+        this.setState({selectedProvider: ev.target.value, searchResults: null, providerSelectOptions: {}, formValues: {}});
     };
     search = (ev) => {
         ev.preventDefault();
@@ -184,34 +240,28 @@ class FeatureSearch extends React.Component {
         Object.keys(provider.params.fields).forEach(fieldname => {
             values[fieldname] = form.elements[fieldname].value;
         });
-        const bbox = CoordinatesUtils.reprojectBbox(this.props.theme.bbox.bounds, this.props.theme.bbox.crs, this.props.theme.mapCrs);
-        const params = {
-            SERVICE: 'WMS',
-            VERSION: this.props.theme.version,
-            REQUEST: 'GetFeatureInfo',
-            CRS: this.props.theme.mapCrs,
-            BBOX: bbox.join(","),
-            WIDTH: 100,
-            HEIGHT: 100,
-            LAYERS: [],
-            FILTER: [],
-            WITH_GEOMETRY: true,
-            WITH_MAPTIP: false,
-            feature_count: provider.params.featureCount || 100,
-            info_format: 'text/xml'
+        const searchParams = {
+            theme: this.props.theme,
+            cfgParams: {
+                featureCount: provider.params.featureCount
+            }
         };
-        Object.keys(filter).forEach(layer => {
-            Object.entries(values).forEach(([key, value]) => {
-                filter[layer] = filter[layer].replace(`$${key}$`, value.replace("'", "\\'"));
-            });
-            params.LAYERS.push(layer);
-            params.FILTER.push(layer + ":" + filter[layer]);
-        });
-        params.QUERY_LAYERS = params.LAYERS = params.LAYERS.join(",");
-        params.FILTER = params.FILTER.join(";");
+        const params = QgisSearch.buildFeatureInfoUrlParams(searchParams, filter, values);
+
         this.setState({busy: true, searchResults: null});
         axios.get(this.props.theme.featureInfoUrl, {params}).then(response => {
             const results = IdentifyUtils.parseResponse(response.data, this.props.theme, 'text/xml', null, this.props.map.projection);
+            // Enable the layers
+            Object.keys(results).forEach(layername => {
+                const path = [];
+                let sublayer = null;
+                const layer = this.props.layers.find(l => {
+                    return l.role === LayerRole.THEME && (sublayer = LayerUtils.searchSubLayer(l, 'name', layername, path));
+                });
+                if (layer && sublayer) {
+                    this.props.changeLayerProperty(layer.id, "visibility", true, path, 'both');
+                }
+            });
             if (provider.params.resultTitle) {
                 Object.entries(results).forEach(([layername, features]) => {
                     features.forEach(feature => {
@@ -224,14 +274,69 @@ class FeatureSearch extends React.Component {
                     });
                 });
             }
+            const bbox = VectorLayerUtils.computeFeaturesBBox(Object.values(results).flat());
+            if (bbox) {
+                const maxZoom = MapUtils.computeZoom(this.props.map.scales, this.props.theme.minSearchScaleDenom || 1000);
+                this.props.zoomToExtent(bbox.bounds, bbox.crs, 0, undefined, maxZoom);
+            }
             this.setState({busy: false, searchResults: results});
         }).catch(() => {
             this.setState({busy: false, searchResults: {}});
         });
     };
+    clearField = (ev, fieldname) => {
+        ev.target.previousElementSibling.value = "";
+        this.setState(state => ({formValues: {...state.formValues, [fieldname]: ev.target.value}}));
+    };
+    reloadSelectOptions = () => {
+        Object.entries(this.state.searchProviders[this.state.selectedProvider]?.params?.fields ?? {}).forEach(([name, fieldcfg]) => {
+            if (fieldcfg.type === "select") {
+                if (fieldcfg.options_query) {
+                    let url = fieldcfg.options_query;
+                    Object.entries(this.state.formValues).forEach(([key, value]) => {
+                        url = url.replace(`$${key}$`, value);
+                    });
+                    if (this.state.providerSelectOptions[name]?.source !== url) {
+                        axios.get(url).then(response => {
+                            let options = [];
+                            if (response.data.type === "FeatureCollection") {
+                                options = Object.entries(response.data.features.reduce((res, feature) => {
+                                    const value = fieldcfg.value_field === 'id' ? feature.id : feature.properties[fieldcfg.value_field];
+                                    const label = fieldcfg.label_field === 'id' ? feature.id : feature.properties[fieldcfg.label_field];
+                                    return {...res, [value]: label};
+                                }, {})).map(entry => ({value: entry[0], label: entry[1]}));
+                            } else if (Array.isArray(response.data)) {
+                                options = response.data.map(entry => ({
+                                    value: entry.key,
+                                    label: entry.value
+                                }));
+                            }
+                            this.setState(state => ({
+                                providerSelectOptions: {...state.providerSelectOptions, [name]: {source: url, options: options}}
+                            }));
+                        }).catch(() => {
+                            /* eslint-disable-next-line */
+                            console.warn(`Failed to query options for field ${name}`);
+                            this.setState(state => ({
+                                providerSelectOptions: {...state.providerSelectOptions, [name]: {source: url, options: []}}
+                            }));
+                        });
+                    }
+                } else if (fieldcfg.options && !this.state.providerSelectOptions[name]) {
+                    this.setState(state => ({
+                        providerSelectOptions: {...state.providerSelectOptions, [name]: {source: "static", options: fieldcfg.options}}
+                    }));
+                }
+            }
+        });
+    };
 }
 
 export default connect((state) => ({
+    layers: state.layers.flat,
     map: state.map,
     theme: state.theme.current
-}), {})(FeatureSearch);
+}), {
+    changeLayerProperty: changeLayerProperty,
+    zoomToExtent: zoomToExtent
+})(FeatureSearch);

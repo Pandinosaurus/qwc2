@@ -1,6 +1,6 @@
 /**
  * Copyright 2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,21 +8,23 @@
 */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {
     FacebookShareButton,
     LinkedinShareButton,
     TwitterShareButton,
     WhatsappShareButton,
     EmailShareButton,
-    FacebookShareCount,
     FacebookIcon,
     TwitterIcon,
     LinkedinIcon,
     WhatsappIcon,
     EmailIcon
 } from 'react-share';
+
+import PropTypes from 'prop-types';
+
 import LocaleUtils from '../../utils/LocaleUtils';
+
 import './style/ShareSocials.css';
 
 
@@ -32,9 +34,6 @@ export default class ShareSocials extends React.Component {
         shareTitle: PropTypes.string,
         shareUrl: PropTypes.string,
         showSocials: PropTypes.oneOfType([PropTypes.bool, PropTypes.array])
-    };
-    static defaultProps = {
-        shareTitle: 'GeoSolutions'
     };
     render() {
         const countProps = {};
@@ -50,9 +49,6 @@ export default class ShareSocials extends React.Component {
                     <EmailShareButton subject={title} url={url}>
                         <EmailIcon round size={32} />
                     </EmailShareButton>
-                    <div>
-                        &nbsp;
-                    </div>
                 </div>
             ),
             facebook: (
@@ -60,9 +56,6 @@ export default class ShareSocials extends React.Component {
                     <FacebookShareButton quote={title} url={url}>
                         <FacebookIcon round size={32} />
                     </FacebookShareButton>
-                    <FacebookShareCount url={url} {...countProps}>
-                        {count => count}
-                    </FacebookShareCount>
                 </div>
             ),
             twitter: (
@@ -70,9 +63,6 @@ export default class ShareSocials extends React.Component {
                     <TwitterShareButton title={title} url={url}>
                         <TwitterIcon round size={32} />
                     </TwitterShareButton>
-                    <div>
-                        &nbsp;
-                    </div>
                 </div>
             ),
             linkedin: (
@@ -80,9 +70,6 @@ export default class ShareSocials extends React.Component {
                     <LinkedinShareButton title={title} url={url}>
                         <LinkedinIcon round size={32} />
                     </LinkedinShareButton>
-                    <div>
-                        &nbsp;
-                    </div>
                 </div>
             ),
             whatsapp: (
@@ -90,9 +77,6 @@ export default class ShareSocials extends React.Component {
                     <WhatsappShareButton title={title} url={url}>
                         <WhatsappIcon round size={32} />
                     </WhatsappShareButton>
-                    <div>
-                        &nbsp;
-                    </div>
                 </div>
             )
         };

@@ -1,5 +1,5 @@
 /**
- * Copyright 2018-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,9 +7,12 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
-import Icon from '../Icon';
+
 import LocaleUtils from '../../utils/LocaleUtils';
+import Icon from '../Icon';
+
 import './style/CopyButton.css';
 
 
@@ -64,7 +67,7 @@ export default class CopyButton extends React.Component {
                     const item = new ClipboardItem(data);
                     navigator.clipboard.write([item]);
                     this.setState({copied: true});
-                } catch (e) {
+                } catch {
                     this.setState({copied: false});
                 }
             });

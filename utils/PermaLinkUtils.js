@@ -1,24 +1,40 @@
 /**
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-import url from 'url';
 import axios from 'axios';
+import url from 'url';
+
 import {LayerRole} from '../actions/layers';
+import {getStore} from '../stores/StandardStore';
 import ConfigUtils from '../utils/ConfigUtils';
 import LayerUtils from '../utils/LayerUtils';
 
 let UrlQuery = {};
 let historyUpdateTimeout = null;
 let pendingParams = {};
+let detached = false;
+let detachedBaseUrl = "";
 
 export const UrlParams = {
+    /**
+     * Detaches the parameter store from the document location, for embedding QWC2 into a
+     * host application which owns the location. Call before initializing the application.
+     *
+     * @param initialParams The initial parameters, i.e. the state to start with
+     * @param baseUrl The base URL for generated permalinks, defaults to the document location
+     */
+    detach(initialParams = {}, baseUrl = "") {
+        detached = true;
+        detachedBaseUrl = baseUrl;
+        UrlQuery = {...initialParams};
+    },
     updateParams(dict, forceLocationUrl = false) {
-        if (ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
+        if (detached || ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
             UrlQuery = Object.assign(UrlQuery, dict);
             const propNames = Object.getOwnPropertyNames(UrlQuery);
 
@@ -27,7 +43,7 @@ export const UrlParams = {
                     delete UrlQuery[propName];
                 }
             }
-            if (!forceLocationUrl) {
+            if (detached || !forceLocationUrl) {
                 return;
             }
         }
@@ -53,6 +69,9 @@ export const UrlParams = {
         }, 250);
     },
     getParam(key) {
+        if (detached) {
+            return UrlQuery[key];
+        }
         const urlObj = url.parse(window.location.href, true);
         if (ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
             return urlObj.query[key] ?? UrlQuery[key];
@@ -61,6 +80,9 @@ export const UrlParams = {
         }
     },
     getParams() {
+        if (detached) {
+            return {...UrlQuery};
+        }
         const query = url.parse(window.location.href, true).query;
         if (ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
             return {...UrlQuery, ...query};
@@ -68,12 +90,22 @@ export const UrlParams = {
             return query;
         }
     },
+    /**
+     * Cancels a pending location update, so that it does not fire after the application
+     * has been torn down.
+     */
+    cancelPendingUpdates() {
+        clearTimeout(historyUpdateTimeout);
+        historyUpdateTimeout = null;
+        pendingParams = {};
+    },
     clear() {
-        this.updateParams({k: undefined, t: undefined, l: undefined, bl: undefined, bk: undefined, c: undefined, s: undefined, e: undefined, crs: undefined, st: undefined, sp: undefined, f: undefined}, true);
+        const clearKeys = ['k', 't', 'l', 'bl', 'bk', 'c', 'hc', 'ic', 'if', 's', 'e', 'crs', 'st', 'sp', 'f', 'v', 'vp', 'v3d', 'bl3d', 'task'];
+        this.updateParams(clearKeys.reduce((res, key) => ({...res, [key]: undefined}), {}), true);
     },
     getFullUrl() {
-        if (ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
-            const urlObj = url.parse(window.location.href, true);
+        if (detached || ConfigUtils.getConfigProp("omitUrlParameterUpdates") === true) {
+            const urlObj = url.parse(detachedBaseUrl || window.location.href, true);
             urlObj.query = UrlQuery;
             delete urlObj.search;
             return url.format(urlObj);
@@ -83,119 +115,192 @@ export const UrlParams = {
     }
 };
 
-export function generatePermaLink(state, callback, user = false) {
-    const fullUrl = UrlParams.getFullUrl();
-    if (!ConfigUtils.getConfigProp("permalinkServiceUrl")) {
-        callback(fullUrl);
-        return;
+const PermalinkDataHooks = {};
+
+export function registerPermalinkDataStoreHook(key, storeFn) {
+    PermalinkDataHooks[key] = storeFn;
+}
+
+export function unregisterPermalinkDataStoreHook(key) {
+    delete PermalinkDataHooks[key];
+}
+
+async function executePermalinkDataStoreHooks(permalinkState, query) {
+    for await (const [key, storeFn] of Object.entries(PermalinkDataHooks)) {
+        const result = await storeFn();
+        if (result.state) {
+            permalinkState[key] = result.state;
+        }
+        if (result.query) {
+            Object.assign(query, result.query);
+        }
     }
-    const permalinkState = {};
+}
+
+function serializeLayers(state) {
     if (ConfigUtils.getConfigProp("storeAllLayersInPermalink")) {
-        permalinkState.layers = state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND);
+        return state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND);
     } else {
         // Only store redlining layers
         const exploded = LayerUtils.explodeLayers(state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND));
         const redliningLayers = exploded.map((entry, idx) => ({...entry, pos: idx}))
             .filter(entry => entry.layer.role === LayerRole.USERLAYER && entry.layer.type === 'vector')
             .map(entry => ({...entry.layer, pos: entry.pos}));
-        permalinkState.layers = redliningLayers;
+        return redliningLayers;
     }
-    permalinkState.url = fullUrl;
+}
+
+export async function generatePermaLink(callback, user = false, permittedGroup = "") {
+    const state = getStore().getState();
+    const fullUrl = UrlParams.getFullUrl();
+    if (!ConfigUtils.getConfigProp("permalinkServiceUrl")) {
+        callback(fullUrl);
+        return;
+    }
+    const permalinkState = {layers: serializeLayers(state)};
+    const urlObj = url.parse(UrlParams.getFullUrl(), true);
+    const queryParams = {};
+    await executePermalinkDataStoreHooks(permalinkState, queryParams);
+    Object.assign(urlObj.query, queryParams);
+    delete urlObj.search;
+    permalinkState.url = url.format(urlObj);
+    const params = {
+        permitted_group: permittedGroup || null
+    };
     const route = user ? "userpermalink" : "createpermalink";
-    axios.post(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/" + route, permalinkState)
+    axios.post(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/" + route, permalinkState, {params})
         .then(response => callback(response.data.permalink || fullUrl, response.data.expires || null))
         .catch(() => callback(fullUrl));
 }
 
 export function resolvePermaLink(initialParams, callback) {
-    const key = UrlParams.getParam('k');
-    const bkey = UrlParams.getParam('bk');
-    if (key) {
-        axios.get(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/resolvepermalink?key=" + key)
-            .then(response => {
-                const data = response.data;
-                callback({...initialParams, ...(data.query || {})}, data.state || {}, !!data.query);
-            })
-            .catch(() => {
-                callback(initialParams, {}, false);
-            });
-    } else if (bkey) {
-        axios.get(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/bookmarks/" + bkey)
-            .then(response => {
-                const data = response.data;
-                callback({...initialParams, ...(data.query || {})}, (data.state || {}), !!data.query);
-            })
-            .catch(() => {
-                callback(initialParams, {}, false);
-            });
-    } else {
+    const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+    const key = initialParams.k;
+    const bkey = initialParams.bk;
+    const vpKey = initialParams.vp;
+    if (!permalinkServiceUrl || (!key && !bkey && !vpKey)) {
         callback(initialParams, {}, true);
+        return;
     }
+
+    if (vpKey) {
+        // eslint-disable-next-line no-use-before-define
+        VisibilityPresetsInterface.resolve(vpKey, (preset, themeId) => {
+            if (preset && themeId) {
+                callback(
+                    {...initialParams, t: themeId},
+                    {visibilityPreset: preset},
+                    true
+                );
+            } else {
+                callback(initialParams, {}, false);
+            }
+        });
+        return;
+    }
+
+    const path = key ? "/resolvepermalink?key=" + key : "/bookmarks/" + bkey;
+    axios.get(permalinkServiceUrl + path)
+        .then(response => {
+            const data = response.data;
+            callback({...initialParams, ...data.query}, data.state || {}, !!data.query);
+        })
+        .catch(() => {
+            callback(initialParams, {}, false);
+        });
+
 }
 
-export function getUserBookmarks(user, callback) {
-    if (user) {
-        axios.get(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/bookmarks/")
+// Bookmarks
+export const BookmarksInterface = {
+    resolve(bkey, callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.get(permalinkServiceUrl + "/bookmarks/" + bkey)
             .then(response => {
-                callback(response.data || []);
+                const data = response.data;
+                callback(data.query || {}, data.state || {}, !!data.query);
             })
-            .catch(() => {
-                callback([]);
-            });
+            .catch(() => callback({}, {}, false));
+    },
+    getList(callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.get(permalinkServiceUrl + "/bookmarks/")
+            .then(response => callback(response.data || []))
+            .catch(() => callback([]));
+    },
+    async _getState() {
+        const state = getStore().getState();
+        const bookmarkState = {layers: serializeLayers(state)};
+        const urlObj = url.parse(UrlParams.getFullUrl(), true);
+        const queryParams = {};
+        await executePermalinkDataStoreHooks(bookmarkState, queryParams);
+        Object.assign(urlObj.query, queryParams);
+        delete urlObj.search;
+        bookmarkState.url = url.format(urlObj);
+        return bookmarkState;
+    },
+    async create(description, callback) {
+        const bookmarkState = await(BookmarksInterface._getState());
+        const themeId = getStore().getState().theme?.current?.id ?? null;
+        const params = {description, theme_id: themeId};
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.post(permalinkServiceUrl + "/bookmarks/", bookmarkState, {params})
+            .then((response) => callback(response.data?.success, response.data?.key))
+            .catch(() => callback(false, null));
+    },
+    async update(bkey, params, updateData, callback) {
+        const bookmarkState = updateData ? await(BookmarksInterface._getState()) : null;
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.put(permalinkServiceUrl + "/bookmarks/" + bkey, bookmarkState, {params})
+            .then((response) => callback(response.data?.success))
+            .catch(() => callback(false));
+    },
+    delete(bkey, callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.delete(permalinkServiceUrl + "/bookmarks/" + bkey)
+            .then((response) => callback(response.data?.success))
+            .catch(() => callback(false));
     }
-}
+};
 
-export function removeBookmark(bkey, callback) {
-    if (bkey) {
-        axios.delete(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/bookmarks/" + bkey)
-            .then(() => {
-                callback(true);
-            }).catch(() => callback(false));
+export const VisibilityPresetsInterface = {
+    resolve(vpkey, callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.get(permalinkServiceUrl + "/visibility_presets/" + vpkey)
+            .then(response => callback(response.data?.visibility_preset, response.data?.theme_id))
+            .catch(() => callback(null, null));
+    },
+    getList(callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.get(permalinkServiceUrl + "/visibility_presets/")
+            .then(response => callback(response.data || []))
+            .catch(() => callback([]));
+    },
+    create(description, callback) {
+        const state = getStore().getState();
+        const preset = LayerUtils.computeVisibilityPreset(state.layers.flat);
+        const themeId = state.theme?.current?.id ?? null;
+        const params = {description, theme_id: themeId};
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.post(permalinkServiceUrl + "/visibility_presets/", preset, {params})
+            .then((response) => callback(response.data?.success, response.data?.key))
+            .catch(() => callback(false));
+    },
+    update(vpkey, params_, updateData, callback) {
+        const state = getStore().getState();
+        const preset = updateData ? LayerUtils.computeVisibilityPreset(state.layers.flat) : null;
+        const themeId = state.theme?.current?.id ?? null;
+        const params = {...params_, theme_id: themeId};
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.put(permalinkServiceUrl + "/visibility_presets/" + vpkey, preset, {params})
+            .then((response) => callback(response.data?.success))
+            .catch(() => callback(false));
+    },
+    delete(vpkey, callback) {
+        const permalinkServiceUrl = ConfigUtils.getConfigProp("permalinkServiceUrl")?.replace?.(/\/$/, '');
+        axios.delete(permalinkServiceUrl + "/visibility_presets/" + vpkey)
+            .then((response) => callback(response.data?.success))
+            .catch(() => callback(false));
     }
-}
 
-export function createBookmark(state, description, callback) {
-    if (!ConfigUtils.getConfigProp("permalinkServiceUrl")) {
-        callback(false);
-        return;
-    }
-    // Only store redlining layers
-    const exploded = LayerUtils.explodeLayers(state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND));
-    const bookmarkState = {};
-    if (ConfigUtils.getConfigProp("storeAllLayersInPermalink")) {
-        bookmarkState.layers = state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND);
-    } else {
-        const redliningLayers = exploded.map((entry, idx) => ({...entry, pos: idx}))
-            .filter(entry => entry.layer.role === LayerRole.USERLAYER && entry.layer.type === 'vector')
-            .map(entry => ({...entry.layer, pos: entry.pos}));
-        bookmarkState.layers = redliningLayers;
-    }
-    bookmarkState.url = UrlParams.getFullUrl();
-    axios.post(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/bookmarks/" +
-        "?description=" + description, bookmarkState)
-        .then(() => callback(true))
-        .catch(() => callback(false));
-}
-
-export function updateBookmark(state, bkey, description, callback) {
-    if (!ConfigUtils.getConfigProp("permalinkServiceUrl")) {
-        callback(false);
-        return;
-    }
-    // Only store redlining layers
-    const exploded = LayerUtils.explodeLayers(state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND));
-    const bookmarkState = {};
-    if (ConfigUtils.getConfigProp("storeAllLayersInPermalink")) {
-        bookmarkState.layers = state.layers.flat.filter(layer => layer.role !== LayerRole.BACKGROUND);
-    } else {
-        const redliningLayers = exploded.map((entry, idx) => ({...entry, pos: idx}))
-            .filter(entry => entry.layer.role === LayerRole.USERLAYER && entry.layer.type === 'vector')
-            .map(entry => ({...entry.layer, pos: entry.pos}));
-        bookmarkState.layers = redliningLayers;
-    }
-    bookmarkState.url = UrlParams.getFullUrl();
-    axios.put(ConfigUtils.getConfigProp("permalinkServiceUrl").replace(/\/$/, '') + "/bookmarks/" + bkey +
-        "?description=" + description, bookmarkState)
-        .then(() => callback(true))
-        .catch(() => callback(false));
-}
+};

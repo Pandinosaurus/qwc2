@@ -1,5 +1,5 @@
 /**
- * Copyright 2019-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,8 +7,10 @@
  */
 
 import React from 'react';
+
 import PropTypes from 'prop-types';
 import {v4 as uuidv4} from 'uuid';
+
 import Icon from '../../components/Icon';
 import LocaleUtils from '../../utils/LocaleUtils';
 
@@ -25,13 +27,13 @@ export default class VectorLayerPicker extends React.Component {
     };
     render() {
         return (
-            <div className="VectorLayerPicker">
+            <div className="VectorLayerPicker controlgroup">
                 <select onChange={ev => this.props.onChange(this.props.layers.find(layer => layer.id === ev.target.value))} value={this.props.value}>
                     {this.props.showNone ? (<option value="">{LocaleUtils.tr("vectorlayerpicker.none")}</option>) : null}
                     {this.props.layers.map(layer => (<option key={layer.id} value={layer.id}>{layer.title}</option>))}
                 </select>
                 {this.props.addLayer ? (
-                    <button className="button" onClick={this.addLayer} style={{borderLeftWidth: 0}}><Icon icon="plus" /></button>
+                    <button className="button" onClick={this.addLayer}><Icon icon="plus" /></button>
                 ) : null}
             </div>
         );

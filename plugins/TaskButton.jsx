@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,25 +7,30 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
-import classnames from 'classnames';
+
+import PropTypes from 'prop-types';
+
 import {setCurrentTask} from '../actions/task';
-import Icon from '../components/Icon';
+import MapButton from '../components/MapButton';
 import ConfigUtils from '../utils/ConfigUtils';
 import LocaleUtils from "../utils/LocaleUtils";
 import ThemeUtils from '../utils/ThemeUtils';
-import './style/BackgroundSwitcher.css';
 
 /**
  * Generic map button to launch a task.
+ *
+ * The `task` generally corresponds to the `key` of a menuItem or toolbaritem.
+ *
+ * The following special values for `task` are suppported:
+ *
+ * * `ServiceInfo`: Open the service info of the current theme.
  */
 class TaskButton extends React.Component {
     static propTypes = {
         currentTask: PropTypes.string,
         /** The icon name.  */
         icon: PropTypes.string,
-        mapMargins: PropTypes.object,
         /** The task mode. */
         mode: PropTypes.string,
         /** The position slot index of the map button, from the bottom (0: bottom slot). */
@@ -43,25 +48,14 @@ class TaskButton extends React.Component {
         position: 1
     };
     render() {
-        if (!ThemeUtils.themFlagsAllowed(this.props.theme, this.props.themeFlagWhitelist, this.props.themeFlagBlacklist)) {
+        if (!ThemeUtils.themeFlagsAllowed(this.props.theme, this.props.themeFlagWhitelist, this.props.themeFlagBlacklist)) {
             return null;
         }
-        const right = this.props.mapMargins.right;
-        const bottom = this.props.mapMargins.bottom;
-        const style = {
-            right: 'calc(1.5em + ' + right + 'px)',
-            bottom: 'calc(' + bottom + 'px + ' + (5 + 4 * this.props.position) + 'em)'
-        };
-        const classes = classnames({
-            "map-button": true,
-            "map-button-active": this.props.currentTask === this.props.task
-        });
         const title = LocaleUtils.tr("appmenu.items." + this.props.task + (this.props.mode || ""));
         return (
-            <button className={classes} onClick={this.buttonClicked}
-                style={style} title={title}>
-                <Icon icon={this.props.icon} />
-            </button>
+            <MapButton active={this.props.currentTask === this.props.task}
+                icon={this.props.icon} onClick={this.buttonClicked}
+                position={this.props.position} tooltip={title} />
         );
     }
     buttonClicked = () => {
@@ -72,7 +66,6 @@ class TaskButton extends React.Component {
 
 const selector = (state) => ({
     currentTask: state.task.id,
-    mapMargins: state.windows.mapMargins,
     theme: state.theme.current
 });
 

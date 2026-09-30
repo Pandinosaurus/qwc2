@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,34 +7,39 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
 import axios from 'axios';
-import isEmpty from 'lodash.isempty';
 import {remove as removeDiacritics} from 'diacritics';
-import Icon from './Icon';
+import isEmpty from 'lodash.isempty';
+import PropTypes from 'prop-types';
+
+import {setActiveLayerInfo} from '../actions/layerinfo';
+import {LayerRole, addLayer} from '../actions/layers';
+import {setUserInfoFields} from '../actions/localConfig';
+import {setCurrentTask} from '../actions/task';
+import {setCurrentTheme, setThemeLayersList} from '../actions/theme';
 import ConfigUtils from '../utils/ConfigUtils';
 import LocaleUtils from '../utils/LocaleUtils';
+import MiscUtils from '../utils/MiscUtils';
 import ThemeUtils from '../utils/ThemeUtils';
-import {LayerRole, addLayer} from '../actions/layers';
-import {setCurrentTheme, setThemeLayersList} from '../actions/theme';
-import {setCurrentTask} from '../actions/task';
-import {setActiveLayerInfo} from '../actions/layerinfo';
-import {setUserInfoFields} from '../actions/localConfig';
+import Icon from './Icon';
+
 import './style/ThemeList.css';
 
 class ThemeList extends React.Component {
     static propTypes = {
         activeTheme: PropTypes.object,
         addLayer: PropTypes.func,
+        allowAddingOtherThemeLayers: PropTypes.bool,
         allowAddingOtherThemes: PropTypes.bool,
         changeTheme: PropTypes.func,
         collapsibleGroups: PropTypes.bool,
         defaultUrlParams: PropTypes.string,
         dontPreserveSettingsOnSwitch: PropTypes.bool,
+        expandGroups: PropTypes.bool,
         filter: PropTypes.string,
         layers: PropTypes.array,
-        mapConfig: PropTypes.object,
         setActiveLayerInfo: PropTypes.func,
         setCurrentTask: PropTypes.func,
         setThemeLayersList: PropTypes.func,
@@ -44,7 +49,7 @@ class ThemeList extends React.Component {
         themes: PropTypes.object
     };
     state = {
-        expandedGroups: [],
+        expandedGroups: {},
         visibleThemeInfoMenu: null
     };
     groupMatchesFilter = (group, filter) => {
@@ -67,20 +72,24 @@ class ThemeList extends React.Component {
         return false;
     };
     renderThemeGroup = (group, filter) => {
+        const defaultExpanded = this.props.expandGroups;
         const assetsPath = ConfigUtils.getAssetsPath();
         let subdirs = (group && group.subdirs ? group.subdirs : []);
         if (filter) {
             subdirs = subdirs.filter(subdir => this.groupMatchesFilter(subdir, filter));
         }
         const subtree = subdirs.map((subdir) => {
-            const expanded = !this.props.collapsibleGroups || filter || this.state.expandedGroups.includes(subdir.id) || (this.props.activeTheme && this.groupContainsActiveTheme(subdir));
-            if (isEmpty(subdir.items)) {
+            const expanded = !this.props.collapsibleGroups || filter || (this.state.expandedGroups[subdir.id] ?? defaultExpanded) || (this.props.activeTheme && this.groupContainsActiveTheme(subdir));
+            if (isEmpty(subdir.items) && isEmpty(subdir.subdirs)) {
                 return null;
             }
             return (
                 <li className={"theme-group-header " + (expanded ? "theme-group-header-expanded" : "")} key={subdir.id}>
-                    <span onClick={() => this.setState((state) => ({expandedGroups: expanded ? state.expandedGroups.filter(id => id !== subdir.id) : [...state.expandedGroups, subdir.id]}))}>
-                        {this.props.collapsibleGroups ? (<Icon icon={expanded ? "collapse" : "expand"} />) : null} {subdir.title}
+                    <span
+                        onClick={() => this.setState((state) => ({expandedGroups: {...state.expandedGroups, [subdir.id]: !expanded}}))}
+                        onKeyDown={MiscUtils.checkKeyActivate} tabIndex="0"
+                    >
+                        {this.props.collapsibleGroups ? (<Icon icon={expanded ? "collapse" : "expand"} />) : null} {subdir.titleMsgId ? LocaleUtils.tr(subdir.titleMsgId) : subdir.title}
                     </span>
                     {expanded ? this.renderThemeGroup(subdir, filter) : null}
                 </li>
@@ -101,13 +110,13 @@ class ThemeList extends React.Component {
                     if (filter) {
                         let match = null;
                         if ((match = removeDiacritics(item.title).match(filter))) {
-                            matches.push([LocaleUtils.trmsg("themeswitcher.match.title"), this.extractSubstr(match, item.title), item.title]);
+                            matches.push([LocaleUtils.tr("themeswitcher.match.title"), this.extractSubstr(match, item.title), item.title]);
                         }
                         if ((match = removeDiacritics(item.keywords || "").match(filter))) {
-                            matches.push([LocaleUtils.trmsg("themeswitcher.match.keywords"), this.extractSubstr(match, item.keywords), item.keywords]);
+                            matches.push([LocaleUtils.tr("themeswitcher.match.keywords"), this.extractSubstr(match, item.keywords), item.keywords]);
                         }
                         if ((match = removeDiacritics(item.abstract || "").match(filter))) {
-                            matches.push([LocaleUtils.trmsg("themeswitcher.match.abstract"), this.extractSubstr(match, item.abstract), item.abstract]);
+                            matches.push([LocaleUtils.tr("themeswitcher.match.abstract"), this.extractSubstr(match, item.abstract), item.abstract]);
                         }
                         if (isEmpty(matches)) {
                             return null;
@@ -142,13 +151,13 @@ class ThemeList extends React.Component {
                                     </div>
                                 ) : null}
                             </div>) : null}
-                            <div className="theme-item-body">
-                                {item.description ? (<div className="theme-item-description" dangerouslySetInnerHTML={{__html: item.description}} />) : null}
+                            <div className="theme-item-body" onKeyDown={MiscUtils.checkKeyActivate} tabIndex={0}>
+                                {item.description ? (<div className="theme-item-description" dangerouslySetInnerHTML={{__html: MiscUtils.sanitizeHtml(item.description)}} />) : null}
                                 <img className="theme-item-thumbnail" src={assetsPath + "/" + item.thumbnail} />
                             </div>
                             {!item.restricted ? (
                                 <div className="theme-item-icons">
-                                    {this.props.allowAddingOtherThemes ? (<Icon icon="layers" onClick={ev => this.getThemeLayersToList(ev, item)} title={addLayersTitle} />) : null}
+                                    {this.props.allowAddingOtherThemeLayers ? (<Icon icon="layers" onClick={ev => this.getThemeLayersToList(ev, item)} title={addLayersTitle} />) : null}
                                     {this.props.allowAddingOtherThemes ? (<Icon icon="plus" onClick={ev => this.addThemeLayers(ev, item)} title={addTitle} />) : null}
                                     <Icon icon="open_link" onClick={ev => this.openInTab(ev, item.id)} title={openTabTitle} />
                                     {this.props.showDefaultThemeSelector && username  ? (<Icon className={ (this.extractThemeId(this.props.defaultUrlParams) === item.id ? "icon-active" : "")} icon="new" onClick={ev => this.changeDefaultUrlParams(ev, item.id)} title={changeDefaultUrlTitle} />) : null }
@@ -158,10 +167,15 @@ class ThemeList extends React.Component {
                                     <Icon icon="lock" />
                                 </div>
                             )}
+                            {item.hasRestrictedContent ? (
+                                <div className="theme-item-restricted-content" title={LocaleUtils.tr("themeswitcher.restrictedcontent")}>
+                                    <Icon icon="lock" />
+                                </div>
+                            ) : null}
                             {isEmpty(matches) ? null : (
                                 <div className="theme-item-filterinfo-overlay">
                                     {matches.map(match => (
-                                        <div key={match[0]} title={match[2]}><i>{LocaleUtils.tr(match[0])}:</i><br />{match[1][0]}<b>{match[1][1]}</b>{match[1][2]}</div>
+                                        <div key={match[0]} title={match[2]}><i>{match[0]}:</i><br />{match[1][0]}<b>{match[1][1]}</b>{match[1][2]}</div>
                                     ))}
                                 </div>
                             )}
@@ -274,7 +288,6 @@ class ThemeList extends React.Component {
 const selector = (state) => ({
     themes: state.theme.themes || {},
     layers: state.layers.flat,
-    mapConfig: state.map,
     defaultUrlParams: state.localConfig.user_infos?.default_url_params || ""
 });
 

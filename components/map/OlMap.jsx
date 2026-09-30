@@ -1,22 +1,24 @@
 /**
  * Copyright 2015-2016 GeoSolutions Sas
- * Copyright 2016-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
-import ol from 'openlayers';
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import isEqual from 'lodash.isequal';
+import ol from 'openlayers';
+import PropTypes from 'prop-types';
+
 import {changeMapView, clickOnMap} from '../../actions/map';
-import {changeMousePositionState} from '../../actions/mousePosition';
 import {setCurrentTask} from '../../actions/task';
 import ConfigUtils from '../../utils/ConfigUtils';
+import CoordinatesUtils from '../../utils/CoordinatesUtils';
 import LocaleUtils from '../../utils/LocaleUtils';
 import MapUtils from '../../utils/MapUtils';
-import CoordinatesUtils from '../../utils/CoordinatesUtils';
 
 ol.Map.prototype.setRequestsPaused = function(paused) {
     this.requestsPaused_ = paused;
@@ -34,7 +36,6 @@ class OlMap extends React.Component {
         children: PropTypes.oneOfType([PropTypes.node, PropTypes.func]),
         fullExtent: PropTypes.object,
         id: PropTypes.string,
-        mapMargins: PropTypes.object,
         mapOptions: PropTypes.object,
         mapStateSource: PropTypes.string,
         onClick: PropTypes.func,
@@ -45,7 +46,7 @@ class OlMap extends React.Component {
         projection: PropTypes.string,
         resolutions: PropTypes.array,
         setCurrentTask: PropTypes.func,
-        trackMousePos: PropTypes.bool,
+        topbarHeight: PropTypes.number,
         unsetTaskOnMapClick: PropTypes.bool,
         zoom: PropTypes.number.isRequired
     };
@@ -65,6 +66,7 @@ class OlMap extends React.Component {
     constructor(props) {
         super(props);
         this.ignoreNextClick = false;
+        this.callbackMap = {};
         this.state.mapOptions = {
             ...OlMap.defaultProps.mapOptions,
             ...props.mapOptions
@@ -112,7 +114,6 @@ class OlMap extends React.Component {
             layers: [],
             controls: controls,
             interactions: interactions,
-            keyboardEventTarget: document,
             view: this.createView(props.center, props.zoom, props.projection, props.resolutions, this.state.mapOptions.enableRotation, this.state.mapOptions.rotation)
         });
         this.unpauseTimeout = null;
@@ -126,16 +127,6 @@ class OlMap extends React.Component {
         });
         map.on('singleclick', (event) => this.onClick(0, event.originalEvent, event.pixel));
         map.getViewport().addEventListener('contextmenu', (event) => this.onClick(2, event, this.map.getEventPixel(event)));
-        map.on('pointermove', (event) => {
-            if (this.props.trackMousePos && !this.moving) {
-                this.props.onMouseMove({
-                    position: {
-                        coordinate: event.coordinate,
-                        pixel: event.pixel
-                    }
-                });
-            }
-        });
         map.set('id', props.id);
         map.setIgnoreNextClick = (ignore) => {
             this.ignoreNextClick = ignore;
@@ -144,25 +135,27 @@ class OlMap extends React.Component {
         this.map = map;
         this.registerHooks();
 
+        // Keyboard pan steps are relative to the map size, which changes with the map container
+        map.on('change:size', this.recreateKeyboardInteractions);
         this.recreateKeyboardInteractions();
-        window.addEventListener('resize', this.recreateKeyboardInteractions);
     }
     componentDidMount() {
         this.map.setTarget(this.props.id);
         this.updateMapInfoState();
     }
     componentWillUnmount() {
-        window.removeEventListener('resize', this.recreateKeyboardInteractions);
+        this.map.un('change:size', this.recreateKeyboardInteractions);
     }
     recreateKeyboardInteractions = () => {
         this.keyboardPanInteractions.forEach(interaction => {
             this.map.removeInteraction(interaction);
         });
+        const [width, height] = this.map.getSize() ?? [0, 0];
         this.keyboardPanInteractions = [
-            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panStepSize * document.body.offsetWidth, condition: this.panHStepCondition}),
-            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panStepSize * document.body.offsetHeight, condition: this.panVStepCondition}),
-            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panPageSize * document.body.offsetWidth, condition: this.panHPageCondition}),
-            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panPageSize * document.body.offsetHeight, condition: this.panVPageCondition})
+            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panStepSize * width, condition: this.panHStepCondition}),
+            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panStepSize * height, condition: this.panVStepCondition}),
+            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panPageSize * width, condition: this.panHPageCondition}),
+            new ol.interaction.KeyboardPan({pixelDelta: this.state.mapOptions.panPageSize * height, condition: this.panVPageCondition})
         ];
         this.keyboardPanInteractions.forEach(interaction => {
             this.map.addInteraction(interaction);
@@ -182,7 +175,7 @@ class OlMap extends React.Component {
         }
     };
     static getDerivedStateFromProps(nextProps, state) {
-        if ((nextProps.projection !== state.projection) || (nextProps.resolutions !== state.resolutions)) {
+        if ((nextProps.projection !== state.projection) || !isEqual(nextProps.resolutions, state.resolutions)) {
             return {
                 rebuildView: true,
                 projection: nextProps.projection,
@@ -203,25 +196,28 @@ class OlMap extends React.Component {
             if (prevProps.bbox.rotation !== this.props.bbox.rotation) {
                 view.setRotation(this.props.bbox.rotation);
             }
+            if (!isEqual(prevProps.fullExtent, this.props.fullExtent)) {
+                this.setState({rebuildView: true});
+            }
         }
         if (this.state.rebuildView) {
             this.setState({rebuildView: false});
         }
     }
     panHStepCondition = (ev) => {
-        const horiz = ev.originalEvent.keyCode === 37 || ev.originalEvent.keyCode === 39;
+        const horiz = ev.originalEvent.key === 'ArrowLeft' || ev.originalEvent.key === 'ArrowRight';
         return horiz && ol.events.condition.noModifierKeys(ev) && ol.events.condition.targetNotEditable(ev);
     };
     panVStepCondition = (ev) => {
-        const vert = ev.originalEvent.keyCode === 38 || ev.originalEvent.keyCode === 40;
+        const vert = ev.originalEvent.key === 'ArrowUp' || ev.originalEvent.key === 'ArrowDown';
         return vert && ol.events.condition.noModifierKeys(ev) && ol.events.condition.targetNotEditable(ev);
     };
     panHPageCondition = (ev) => {
-        const horiz = ev.originalEvent.keyCode === 37 || ev.originalEvent.keyCode === 39;
+        const horiz = ev.originalEvent.key === 'ArrowLeft' || ev.originalEvent.key === 'ArrowRight';
         return horiz && ol.events.condition.shiftKeyOnly(ev) && ol.events.condition.targetNotEditable(ev);
     };
     panVPageCondition = (ev) => {
-        const vert = ev.originalEvent.keyCode === 38 || ev.originalEvent.keyCode === 40;
+        const vert = ev.originalEvent.key === 'ArrowUp' || ev.originalEvent.key === 'ArrowDown';
         return vert && ol.events.condition.shiftKeyOnly(ev) && ol.events.condition.targetNotEditable(ev);
     };
     render() {
@@ -249,7 +245,7 @@ class OlMap extends React.Component {
                 }
             });
             view.setZoom(this.props.zoom);
-            view.setCenter(this.props.center)
+            view.setCenter(this.props.center);
             this.map.render();
         }
 
@@ -259,19 +255,7 @@ class OlMap extends React.Component {
                 projection: this.props.projection
             }) : null;
         });
-
-        const style = {
-            left: this.props.mapMargins.left,
-            right: this.props.mapMargins.right,
-            top: this.props.mapMargins.top,
-            bottom: this.props.mapMargins.bottom
-        };
-
-        return (
-            <div id={this.props.id} key="map" style={style}>
-                {children}
-            </div>
-        );
+        return children;
     }
     onClick = (button, event, pixel) => {
         if (this.ignoreNextClick) {
@@ -287,15 +271,34 @@ class OlMap extends React.Component {
         }
         const features = [];
         const format = new ol.format.GeoJSON();
+        let suppressClick = false;
         this.map.forEachFeatureAtPixel(pixel, (feature, layer) => {
-            const featureObj = format.writeFeatureObject(feature);
-            featureObj.layerId = layer ? layer.get('id') : null;
-            features.push(featureObj);
-        });
+            if (suppressClick) {
+                return;
+            } else if (feature.get('__suppress_map_click')) {
+                suppressClick = true;
+                return;
+            }
+            if (!layer) {
+                return;
+            }
+            // Picked vector tile features cause an exception when passed to format.writeFeatureObject
+            try {
+                const featureObj = format.writeFeatureObject(feature);
+                featureObj.layerId = layer ? layer.get('id') : null;
+                features.push(featureObj);
+            } catch {
+                /* pass */
+            }
+        }, {hitTolerance: 5});
+        if (suppressClick) {
+            return;
+        }
+        const evpixel = this.map.getEventPixel(event);
         const data = {
             ts: +new Date(),
             coordinate: this.map.getEventCoordinate(event),
-            pixel: this.map.getEventPixel(event),
+            pixel: [evpixel[0], evpixel[1] - this.props.topbarHeight],
             features: features,
             modifiers: {
                 alt: event.altKey,
@@ -330,31 +333,52 @@ class OlMap extends React.Component {
             constrainRotation: false,
             enableRotation: enableRotation !== false,
             rotation: MapUtils.degreesToRadians(rotation) || 0,
-            extent: extent
+            extent: extent,
+            constrainOnlyCenter: this.props.mapOptions.constrainOnlyCenter || false
         };
         return new ol.View(viewOptions);
     };
     registerHooks = () => {
         MapUtils.registerHook(MapUtils.GET_MAP, this.map);
-        MapUtils.registerHook(MapUtils.GET_PIXEL_FROM_COORDINATES_HOOK, (pos) => {
-            return this.map.getPixelFromCoordinate(pos);
+        MapUtils.registerHook(MapUtils.GET_PIXEL_FROM_COORDINATES_HOOK, (pos, compensateTopbarHeight = true) => {
+            const pixel = this.map.getPixelFromCoordinate(pos);
+            return [pixel[0], pixel[1] - (compensateTopbarHeight ? this.props.topbarHeight : 0)];
         });
         MapUtils.registerHook(MapUtils.GET_COORDINATES_FROM_PIXEL_HOOK, (pixel) => {
+            return this.map.getCoordinateFromPixel([pixel[0], pixel[1] + this.props.topbarHeight]);
+        });
+        MapUtils.registerHook(MapUtils.GET_SNAPPED_COORDINATES_FROM_PIXEL_HOOK, (pixel) => {
             return this.map.getCoordinateFromPixel(pixel);
         });
         MapUtils.registerHook(MapUtils.GET_NATIVE_LAYER, (id) => {
             return this.map.getLayers().getArray().find(layer => layer.get('id') === id);
         });
+        MapUtils.registerHook(MapUtils.ADD_POINTER_MOVE_LISTENER, (callback) => {
+            this.callbackMap[callback] = {
+                move: (event) => {
+                    const pixel = [...event.pixel];
+                    callback({coordinate: event.coordinate, pixel: [pixel[0], pixel[1] - this.props.topbarHeight]});
+                },
+                out: () => {
+                    callback({coordinate: null, pixel: null});
+                }
+            };
+            this.map.on('pointermove', this.callbackMap[callback].move);
+            this.map.getViewport().addEventListener('mouseleave', this.callbackMap[callback].out);
+        });
+        MapUtils.registerHook(MapUtils.REMOVE_POINTER_MOVE_LISTENER, (callback) => {
+            this.map.un('pointermove', this.callbackMap[callback].move);
+            this.map.getViewport().removeEventListener('mouseleave', this.callbackMap[callback].out);
+            delete this.callbackMap[callback];
+        });
     };
 }
 
 export default connect((state) => ({
-    mapMargins: state.windows.mapMargins,
-    trackMousePos: state.mousePosition.enabled || false,
-    unsetTaskOnMapClick: state.task.unsetOnMapClick
+    unsetTaskOnMapClick: state.task.unsetOnMapClick,
+    topbarHeight: state.windows.topbarHeight
 }), {
     onMapViewChanges: changeMapView,
     onClick: clickOnMap,
-    onMouseMove: changeMousePositionState,
     setCurrentTask: setCurrentTask
 })(OlMap);

@@ -1,5 +1,5 @@
 /**
- * Copyright 2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -40,7 +40,8 @@ export default function processNotifications(state = defaultState, action) {
                 [action.id]: {
                     ...state.processes[action.id],
                     status: action.success ? ProcessStatus.SUCCESS : ProcessStatus.FAILURE,
-                    message: action.message
+                    message: action.message,
+                    timeout: action.timeout
                 }
             }
         };

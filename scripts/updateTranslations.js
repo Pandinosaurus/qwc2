@@ -1,19 +1,21 @@
+#!/usr/bin/env node
+
 /**
- * Copyright 2017-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-const fs = require('fs');
 const merge = require('deepmerge');
+const fs = require('fs');
 const objectPath = require('object-path');
 
 const readJSON = (path) => {
     try {
         return JSON.parse(fs.readFileSync(process.cwd() + path, "utf8"));
-    } catch (e) {
+    } catch {
         return {};
     }
 };
@@ -52,6 +54,9 @@ const listDir = (dir, pattern) => {
     let results = [];
     const list = fs.readdirSync(dir);
     list.forEach((file) => {
+        if (file === 'node_modules' || file === 'dist') {
+            return;
+        }
         const path = dir + '/' + file;
         const stat = fs.statSync(path);
         if (stat && stat.isDirectory()) {
@@ -65,9 +70,9 @@ const listDir = (dir, pattern) => {
     return results;
 };
 
-const updateTsConfig = (topdir, tsconfig, collectedMsgIds=null) => {
-    const files = listDir(topdir, new RegExp("^.*\.jsx?$"));
-    const trRegEx = /LocaleUtils\.tr(?:msg)?\((['\"])([A-Za-z0-9\._]+)\1/g;
+const updateTsConfig = (topdir, tsconfig, collectedMsgIds = null) => {
+    const files = listDir(topdir, /^.*\.[jt]sx?$/);
+    const trRegEx = /LocaleUtils\.tr(?:msg)?\((['"])([A-Za-z0-9._-]+)\1/g;
     const msgIds =  new Set();
     for (const file of files) {
         const data = fs.readFileSync(file).toString();
@@ -86,16 +91,19 @@ const updateTsConfig = (topdir, tsconfig, collectedMsgIds=null) => {
     return msgIds;
 };
 
-// Determine workspaces
-const workspaces = readJSON('/package.json').workspaces || [];
+// Determine workspaces / dependencies
+const packageJson = readJSON('/package.json');
+const workspaces = packageJson.workspaces || [];
+const qwcDeps = Object.keys(packageJson.dependencies ?? {qwc2: "0"}).filter(dep => dep.startsWith("qwc"));
 
 // Generate workspace translations
 let collectedMsgIds = new Set();
 for (const workspace of workspaces) {
+    /* eslint-disable-next-line */
     console.log("Generating translations for " + workspace);
-    const newMsgIds = updateTsConfig(process.cwd() + '/' + workspace, '/' + workspace + '/translations/tsconfig.json');
+    const newMsgIds = updateTsConfig(process.cwd() + '/' + workspace, '/' + workspace + '/static/translations/tsconfig.json');
     collectedMsgIds = new Set([...collectedMsgIds, ...newMsgIds]);
-    const config = readJSON('/' + workspace + '/translations/tsconfig.json');
+    const config = readJSON('/' + workspace + '/static/translations/tsconfig.json');
     const strings = [
         ...(config.strings || []),
         ...(config.extra_strings || [])
@@ -106,19 +114,27 @@ for (const workspace of workspaces) {
         const langskel = merge(skel, {locale: lang});
 
         // Merge translations
-        const data = merge(langskel, cleanMessages(readJSON('/' + workspace + '/translations/' + lang + '.json'), langskel));
+        const data = merge(langskel, cleanMessages(readJSON('/' + workspace + '/static/translations/' + lang + '.json'), langskel));
         // Write updated translations file
         try {
-            fs.writeFileSync(process.cwd() + '/' + workspace + '/translations/' + lang + ".json", JSON.stringify(data, null, 2) + "\n");
-            console.log('Wrote ' + workspace + '/translations/' + lang + '.json');
+            fs.writeFileSync(process.cwd() + '/' + workspace + '/static/translations/' + lang + ".json", JSON.stringify(data, null, 2) + "\n");
+            /* eslint-disable-next-line */
+            console.log('Wrote ' + workspace + '/static/translations/' + lang + '.json');
         } catch (e) {
-            console.error('Failed to write ' + workspace + '/translations/' + lang + '.json: ' + e);
+            /* eslint-disable-next-line */
+            console.error('Failed to write ' + workspace + '/static/translations/' + lang + '.json: ' + e);
         }
     }
 }
 
 // Generate application translations
-updateTsConfig(process.cwd() + '/js', '/static/translations/tsconfig.json', collectedMsgIds);
+const basePathArg = process.argv.find((a) => a.startsWith('--basePath='));
+const basePath = basePathArg
+    ? process.cwd() + '/' + basePathArg.slice('--basePath='.length)
+    : fs.existsSync(process.cwd() + '/js')
+        ? process.cwd() + '/js'
+        : process.cwd();
+updateTsConfig(basePath, '/static/translations/tsconfig.json', collectedMsgIds);
 const config = readJSON('/static/translations/tsconfig.json');
 const strings = [
     ...(config.strings || []),
@@ -133,7 +149,11 @@ for (const lang of config.languages || []) {
 
     // Merge translations from workspaces
     for (const workspace of workspaces) {
-        data = merge(data, readJSON('/' + workspace + '/translations/' + lang + '.json'));
+        data = merge(data, readJSON('/' + workspace + '/static/translations/' + lang + '.json'));
+    }
+    // Merge translations from dependencies
+    for (const qwcDep of qwcDeps) {
+        data = merge(data, readJSON('/node_modules/' + qwcDep + '/static/translations/' + lang + '.json'));
     }
 
     // Revert to original values for strings specified in overrides
@@ -147,8 +167,10 @@ for (const lang of config.languages || []) {
     // Write output
     try {
         fs.writeFileSync(process.cwd() + '/static/translations/' + lang + '.json', JSON.stringify(data, null, 2) + "\n");
+        /* eslint-disable-next-line */
         console.log('Wrote static/translations/' + lang + '.json');
     } catch (e) {
+        /* eslint-disable-next-line */
         console.error('Failed to write static/translations/' + lang + '.json: ' + e);
     }
 }

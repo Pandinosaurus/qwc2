@@ -1,5 +1,5 @@
 /**
- * Copyright 2020-2024 Sourcepole AG
+ * Copyright Sourcepole AG
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,10 +7,11 @@
  */
 
 import React from 'react';
-import PropTypes from 'prop-types';
 import {connect} from 'react-redux';
+
+import PropTypes from 'prop-types';
+
 import {addMarker, removeMarker} from '../actions/layers';
-import {UrlParams} from '../utils/PermaLinkUtils';
 
 
 /**
@@ -39,7 +40,6 @@ class StartupMarker extends React.Component {
     componentDidUpdate(prevProps) {
         const highlight = ["true", "1"].includes("" + (this.props.startupParams && this.props.startupParams.hc || "").toLowerCase());
         if (highlight && this.props.theme && !prevProps.theme && this.props.startupParams.c) {
-            UrlParams.updateParams({hc: undefined});
             const point = this.props.startupParams.c.split(/[;,]/g).map(x => parseFloat(x));
             prevProps.addMarker('startupposmarker', point, '', this.props.startupParams.crs || this.props.map.projection);
             this.markerSet = true;
